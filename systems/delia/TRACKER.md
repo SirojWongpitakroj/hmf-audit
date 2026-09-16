@@ -1,0 +1,365 @@
+# DELIA BUILD TRACKER
+
+**Authority:** `DELIA_REQUIREMENTS.md` in this directory is the governing document. This tracker
+is a work breakdown *only*; it never overrides the SRS. Where the two differ, the SRS wins. This
+file was seeded on 2026-09-16 directly from the SRS's own **"Developer Handoff (revision 3)"**
+section (near the end of the file) and the **"Tests runnable now"** list in §22. Nothing has been
+implemented yet — this is the first build pass.
+
+**Read before working:** `DELIA_REQUIREMENTS.md` §1 (scope), §2 (source-of-truth rules, esp. 2.3
+"no unstated optimization" and 2.5 documented deviations DEV-01..20), §2.7 (documented limitations
+LIM-01..05), §21 (Go package layout), §26 (explicit prohibitions), and the **"Developer Handoff
+(revision 3)"** + **"Blocked by User Decision (revision 3)"** sections at the end of the file.
+
+**Status of the SRS itself:** the document's own header says `Status: DRAFT (not ready for dev)`.
+That is true of the document as a whole — most requirements are gated behind OPEN gaps or
+unresolved conflicts. **Tier A below is the carve-out the SRS authors explicitly marked
+implementable now** ("Open gap? = N" in the §24 traceability matrix). Do not treat the DRAFT
+status as blocking Tier A work; do not treat Tier A's existence as clearing anything outside it.
+
+## Binding rules for whoever works this tracker
+
+1. **No unstated optimization** (SRS §2.3, §26). No caching beyond what Eq. (2)/Alg. 1-3
+   literally carry forward, no incremental/alternative Merkle structures, no inclusion proofs, no
+   deduplication, no batching of record-hash broadcasts, no parallel/goroutine verification, no
+   binary-search audit, no alternative leader-election/consensus libraries, no signature
+   aggregation, no on-chain Close challenge period, no REST/gRPC/queues, no Go-simulated ledger.
+   Read SRS §26 in full before writing HMSC or audit code — it is a 22-item explicit prohibition
+   list and TEST-42 checks it.
+2. **No defaults, no assumptions.** If you hit a decision the SRS does not make (search it — most
+   have already been ruled on as `GAP-NN (D)`), **stop that portion**, leave its box unchecked,
+   and add a dated note under "Open gaps found during development" below. Do not guess on
+   anything load-bearing; small, clearly-labelled implementation ambiguities (e.g. "which Solidity
+   test framework to develop against locally") may get a documented, reversible call per the
+   developer agent's own ambiguity rule.
+3. **Check a box only when the criterion is actually met and a test demonstrates it.** Leave
+   partial work unchecked.
+4. **Determinism.** Raw byte encodings, never hex strings, for hashes/keys/GlobalState. Fixed
+   field order everywhere per the GAP-73 layout (see M0).
+5. **Language mapping** (GO-001, SC-002): all off-chain algorithms/protocols in Go, identical
+   algorithms/message-flows/data-structures/asymptotics to the paper. HMSC itself stays a
+   **Solidity contract on a real Ethereum-compatible node** — never reimplemented in Go, never a
+   mock/simulated ledger, without written user approval (SRS §26 item 18).
+6. **Go boundaries** (GO-003, GO-004): no `go` statements, worker pools or memoization inside
+   Alg. 1-4 or the Confirm steps. One OS process per DELIA server in the real deployment; an
+   in-process multi-node harness is for tests only.
+
+## Package layout (DELIA-GO-002, proposal not paper-mandated — follow unless you find a reason not to)
+
+`hash`, `logcache`, `merkle`, `localstate`, `globalstate`, `lsg`, `auditor`, `hmsc/confirm`,
+`hmsc/dispute`, `hmsc/offline`, `hmsc/closure`, `hmsc/chain`, `sig`, `messages`, `contracts/`
+(Solidity). No other top-level packages. See SRS §21 for the "must not contain" column per
+package — it enumerates several of the §26 prohibitions again in package-specific terms.
+
+---
+
+## M0 — Scaffolding, config, and the frozen encoding/test-vector file
+
+**Requirements:** GO-001, GO-002, GO-004, SYS-001, SYS-002, SYS-003, SYS-005, SYS-006, SYS-007,
+DATA-018 (encoding half), CRYPTO-007 (encoding half), NET-033 (framing half)
+
+- [ ] Go module + the exact package skeleton above (`internal/` permitted for shared primitives
+      not otherwise homed). No off-chain Java/JS component. (GO-001, GO-002)
+- [ ] Process model: one OS process per server, its own TLS endpoint, sequential protocol
+      handler; in-process multi-node harness reserved for tests only (GAP-54). (GO-004)
+- [ ] Deployment has exactly three entity kinds — server (LSG module + HMSC module), auditor,
+      ledger node — no coordinator/broker/DB-server/cloud entity. (SYS-001, SYS-003, SYS-005)
+- [ ] Module structure maps onto the three layers: data (LogCacheQueue/LocalState/GlobalState),
+      network (LSG/HMSC/ledger protocol), audit (Integrity Audit/Auditor Forensics). (SYS-006)
+- [ ] mTLS from a private test CA for server-to-server connections; P (participant set) comes
+      from experiment config; one secp256k1 key per participant generated at provisioning.
+      (SYS-002, GAP-48, GAP-49) — cert/key generation tooling belongs here.
+- [ ] No separate log-collector/preprocessor/verifier components: "enable" = start the log
+      reader that feeds LSG, "close" = stop it, coupled with Init and Close. (SYS-007, DEV-08)
+- [ ] **Create the normative test-vector / constants file** (GAP-73 implementer delegation —
+      noted in the SRS as awaiting final user confirmation but treated as decided/frozen for
+      implementation). Freeze in one place, with test vectors:
+      - one-byte purpose codes: STATE, CLOSE, RECOVERY, VOTE
+      - canonical secp256k1 public-key encoding (used for both signing and the CONFIRM-003
+        big-endian key comparison)
+      - GlobalState wire/disk layout: `uint64 nu (BE) || uint32 entry_count (BE) || entry_count
+        × 32-byte LocalState`, P-order positions frozen at Init
+      - signed-bytes layout: `purpose || signer_role || canonical-encoded object` (leave the
+        full signer-role enumeration open where SRS marks it open — GAP-86 residual; freeze only
+        the roles a Tier-A item actually needs)
+      - record hash rule: SHA-256 over the UTF-8 log line, excluding line-ending bytes
+      - frame format for off-chain messages: `uint32 frame_length (BE) || uint8 message_type ||
+        message-specific fields`, raw bytes not hex (GAP-47; message_type codes delegated here)
+      Document this file's own authority note: these are implementer-frozen choices per GAP-73,
+      not paper-mandated. (DATA-018, CRYPTO-007, NET-033)
+
+## M1 — Cryptographic primitives & signing
+
+**Requirements:** CRYPTO-001, CRYPTO-002, CRYPTO-004, CRYPTO-008, CRYPTO-009
+
+- [ ] `H(.)` = SHA-256 via `crypto/sha256`, and it is the *only* hash in the system — used at
+      every cited call site (record hash, Eq. (2), Alg. 1-3, `H(psi)` in OfflineResolving).
+      (CRYPTO-001, CRYPTO-002)
+- [ ] `sig` package: `Gen/Sign/Vrfy` over secp256k1 ECDSA on a SHA-256 digest. This is an
+      implementation decision (paper only permits ECDSA as an example) — record it as such.
+      (CRYPTO-004)
+- [ ] Ethereum address = the address derived from a participant's one secp256k1 key; no second
+      identity mapping. This is what OffList/NewLeader/OnlineMsg "addresses" mean. (CRYPTO-008)
+- [ ] Key generation at provisioning, local private-key storage, no runtime PKI. (CRYPTO-009)
+- [ ] Note for later milestones: `Sign`/`Vrfy` callers use the M0 signed-bytes layout
+      (`purpose || signer_role || encoding`). **LIM-02**: signatures are deliberately not bound
+      to `sid` — do not "fix" this; it is a documented, accepted limitation, not a bug.
+
+## M2 — Data structures: LogCacheQueue, Merkle/LocalState, GlobalState
+
+**Requirements:** DATA-001..017 (DATA-018 encoding lives in M0)
+
+- [ ] `logcache`: `psi_{pi,li}` = ordered sequence of exactly `theta` record-hash digests in
+      record order, duplicates kept, no deduplication. `theta` is required configuration with no
+      global default — a node started without it refuses to run. (DATA-001..007)
+- [ ] Every server retains every other server's current-batch LogCacheQueue (domain-wide scope).
+      (DATA-006)
+- [ ] `merkle.MHTGen(psi)`: leaves = the psi digests as-is (not re-hashed), in record order;
+      internal node = `SHA256(left || right)` over raw 32-byte digests; odd node count at a
+      level duplicates the last node; deterministic. Test vectors: theta=3 →
+      `H(H(L1||L2) || H(L3||L3))`; theta=1 → root = the single leaf (no self-hash at the root
+      for a single-leaf tree — GAP-74). (DATA-008, DATA-009)
+- [ ] `localstate`: Eq. (2) — `li = 0`: `omega = H(root)` (raw 32-byte root as input); `li > 0`:
+      `omega = H(root || omega_prev)` (root first, 64-byte raw concatenation). (DATA-010,
+      DATA-011, DATA-012)
+- [ ] `globalstate`: `G_nu` = array of exactly `n` LocalState entries, positions fixed by the P
+      order frozen at Init. `G_0` = all n positions set to the all-zero 32-byte sentinel,
+      `nu = 0`, never submitted on-chain; the first *generated* state is `G_1`. A server's slot
+      stays the zero sentinel until its first completed batch — that sentinel is never treated
+      as a produced LocalState (GAP-75, consumed later by Alg. 3 in M4). (DATA-013..017)
+
+## M3 — LSG stage 2, Algorithm 1 (GlobalGen), Algorithm 2 (StateVerify)
+
+**Requirements:** LSG-001, LSG-004, LSG-006..012, ALG1-001..006, ALG2-001..007
+
+**Do NOT implement yet:** LSG-002, LSG-003, LSG-005 (the record-hash broadcast: sender identity,
+xi/li fields, out-of-order/missing handling) — blocked by **GAP-05 (OPEN)**. Build LSG stage 2
+against an already-populated `psi` (however it got there in a test harness); do not invent the
+wire format for stage-1 broadcasts.
+
+- [ ] LSG runs only at the network layer (no ledger interaction in this package). A server
+      stores its own record hash in its own LogCacheQueue too. (LSG-001, LSG-004)
+- [ ] Stage 2 trigger: batch `li` full → `MHTGen(psi)` → `Alg1(root, G_{nu-1})` → broadcast
+      `(root, G_nu)`. No GlobalState is generated for a partial batch. (LSG-006, LSG-007)
+- [ ] Receiver calls `Alg2` with its **own** locally maintained psi and `G_{nu-1}` — never a
+      psi/state supplied by the proposer. Invalid → broadcast failure notification
+      `(sender, pi, nu, reason)`, abort this attempt, no dispute invoked, recipients only record
+      it. Valid → replace local `G_{nu-1}` with `G_nu` (provisional until HMSC confirmation,
+      DEV-07). (LSG-008, LSG-009, LSG-010, LSG-011)
+- [ ] Concurrent-proposal handling: the losing proposer re-runs Alg. 1 against the newly accepted
+      state and proposes again; no merge (DEV-07). TEST-43 covers this but is itself blocked by
+      GAP-05 (needs the wire format) — build the re-proposal *logic* now, wire it to stage-1 once
+      GAP-05 clears.
+- [ ] `ALG1.GlobalGen(root, G_{nu-1})`: parse n entries, `omega_i = H(root || omega_{i,prev})`,
+      copy all other entries unchanged, return `G_nu` (nu = input serial + 1). Apply the Eq. (2)
+      `li=0` branch in full — `H(root)`, not `H(root || zero-digest)` (DEV-13, TEST-05b). Caller
+      supplies index `i` (the generating server's position in the frozen P order) — it is not
+      derivable from the inputs alone. (ALG1-001..006)
+- [ ] `ALG2.StateVerify(psi, root, G_{nu-1}, G_nu)`: recompute `root'` fresh every call (no
+      cache); mismatch → return 0 **before** calling GlobalGen; else call `GlobalGen` and compare
+      the full canonical encoding of `(nu, entries)` — `nu` is part of the comparison, `sid` is
+      not. (ALG2-001..007)
+
+## M4 — Algorithm 3 / Audit — structural requirements only
+
+**Requirements:** AUDIT-002, AUDIT-003, AUDIT-004, AUDIT-006, AUDIT-007, AUDIT-008, AUDIT-009,
+AUDIT-010
+
+**Do NOT implement yet:** AUDIT-001, AUDIT-005, AUDIT-011, AUDIT-012, AUDIT-013 — blocked by
+**GAP-81 (CONFLICT)** / residual **GAP-83, GAP-84**. This means: do not build the auditor's
+end-to-end retrieval path (fetching `{G_1..G_nu}` from a server, cross-checking anchors against
+Ethereum event logs). Build `LogVerify` as a pure function over an in-memory record slice and an
+in-memory `{G_1..G_nu}` slice supplied by the caller/test harness.
+
+- [ ] Periodic audit trigger with a configured period; on-demand is a test/CLI-only trigger
+      (DEV-09). (AUDIT-002)
+- [ ] `auditor.LogVerify({records}, {G_1..G_nu}) -> ErrList`, signature matches Alg. 3.
+      (AUDIT-003)
+- [ ] `l` initialized once before the outer loop, never reset per `k` (DEV-01); `k++` after each
+      `G_k`, `l++` per reconstructed batch, single linear pass, every batch rebuilt exactly once.
+      (AUDIT-004, AUDIT-006)
+- [ ] Comparison against the printed indentation: after reconstructing up to the current `li`,
+      mismatch → add `li` to `ErrList`, then unconditionally resume the chain from the ledger
+      value. While a server's slot is still the `G_0` zero sentinel (no completed batch yet), no
+      comparison is made (GAP-75). (AUDIT-007)
+- [ ] Return `ErrList`; empty ⇔ audit passes; it carries only batch numbers, nothing else.
+      (AUDIT-008, AUDIT-009)
+- [ ] Single goroutine, no caching, no Merkle proofs/multiproofs/binary search — instrument and
+      test this directly (one `H` per record per rebuilt batch, one `MHTGen` per inner
+      iteration, zero `go` statements). (AUDIT-010, GO-003) — **TEST-14**
+
+## M5 — HMSC architecture scaffolding + Solidity contract skeleton
+
+**Requirements:** ARCH-001, ARCH-002, ARCH-003, ARCH-005, ARCH-007, ARCH-009, ARCH-010, SC-001,
+SC-002, SC-003, SC-004 (Tier-A entry points only), SC-006
+
+**Do NOT implement yet:** ARCH-004, ARCH-006, ARCH-008, ARCH-011 — blocked (residual GAP-82,
+Tier B) — this means the on-chain leader-rotation-from-anchor bookkeeping and the extra contract
+state it needs stay out of scope here; build the plain instance struct and deployment plumbing
+only.
+
+- [ ] `Γ` instance representation `{sid, P, G, OffList, NewLeader, Parent, ChildList}` — exactly
+      these seven fields as contract storage (extra state, if any, is out of scope until
+      ARCH-011 clears). (ARCH-003)
+- [ ] SCC comprises six *named* protocols (Init, Confirm, Update, DisputeResolving,
+      OfflineResolving, Close) but **Confirm has no contract function** — it is off-chain only
+      (DEV-15). Init/Update/DisputeResolving/OfflineResolving/Close execute on Ethereum; nothing
+      off-chain sends a transaction for state confirmation itself. (ARCH-001, ARCH-002)
+- [ ] Multiple independent instances can exist simultaneously without being closed/recreated to
+      cooperate (topology from manual config, no automatic partitioning — ARCH-005, ARCH-007).
+- [ ] `beta` is required per-instance configuration, no protocol default; a round is
+      "one signed round state, then up to beta no-signed round states" as a *concept* here — the
+      on-chain enforcement of round boundaries is ARCH-008, deferred. (ARCH-009, ARCH-010)
+- [ ] Solidity contract, deployed on a **real** Ethereum-compatible node — not a Go ledger
+      simulator (SRS §26 item 18 is a hard prohibition). The SRS's own experimental target is a
+      private 10-node Geth-compatible PoA network (GAP-50, GAP-78) — that is the eventual
+      deployment target for the §23 experiments; for day-to-day development/unit testing of the
+      contract itself, choosing a standard local Solidity test environment (e.g. Hardhat/Foundry
+      running a real EVM against the same bytecode) is engineering tooling, not a protocol
+      deviation — note whichever choice is made and why. (SC-001, SC-002, SC-006)
+- [ ] `hmsc/chain`: Go-side Ethereum client binding package. Contract logic itself stays in
+      Solidity; this package only calls it. Client library choice is unconstrained (GAP-51, not
+      needed) beyond "a Go Ethereum client compatible with the node." (SC-003)
+- [ ] Contract entry points for the Tier-A protocols only, for now: whatever M6/M7 below actually
+      need. Do not pre-build entry points for blocked protocols. (SC-004, scoped)
+
+## M6 — Off-chain state confirmation: leader election & signed/no-signed round flow
+
+**Requirements:** CONFIRM-001, CONFIRM-002, CONFIRM-005, CONFIRM-006, CONFIRM-007, CONFIRM-013,
+CONFIRM-014, CONFIRM-016, CONFIRM-017, CONFIRM-018, CONFIRM-020
+
+**Do NOT implement yet:** CONFIRM-003, CONFIRM-004, CONFIRM-008..012, CONFIRM-015, CONFIRM-019 —
+blocked (GAP-81/GAP-82/GAP-24 OPEN). This is a narrower cut than it looks: **TEST-17** and
+**TEST-17b** (basic off-chain leader rotation, including OffList-skip) are explicitly listed as
+runnable now even though the full CONFIRM-003/004 requirement rows are gated — build the *basic*
+election rule those two tests need; do NOT build the SCC on-chain "expected leader derived from
+the latest accepted signed-round anchor" mechanic (that part of CONFIRM-003/004 is what's
+actually blocked), and do NOT build parent/child upward-propagation recursion (CONFIRM-010/011/012,
+GAP-24 OPEN).
+
+- [ ] At most one leader per instance at any time; every participant gets equal opportunity
+      across rounds. (CONFIRM-001, CONFIRM-002)
+- [ ] **TEST-17**: off-chain-only rotation over `P = {K1 < K2 < K3}` (keys compared as
+      fixed-width unsigned big-endian values of the M0 canonical encoding): round 1 leader = min
+      key; leader doesn't repeat next round; rotation restarts at the minimum once exhausted →
+      `K1, K2, K3, K1` over 4 rounds.
+- [ ] **TEST-17b** (DEV-11): same rotation, but a participant in the *finalized* on-chain OffList
+      is skipped; a merely *pending, unfinalized* OfflineMsg must **not** affect eligibility.
+- [ ] Signed round state, single instance, 3-step flow: participant sends `G_nu` to its leader →
+      leader signs `(purpose=STATE, ...)` and broadcasts `(G_nu, S_leader)` → each recipient
+      verifies `S_leader` (a bad signature produces no countersignature) and produces its own
+      countersignature. (CONFIRM-005, CONFIRM-007, CONFIRM-008, CONFIRM-009, CONFIRM-013) —
+      **TEST-18 needs the role-set from GAP-86 (open) for full verification; build only the
+      single-instance flow this milestone's Tier-A items need, not the hierarchy/parent parts.**
+- [ ] No-signed round states are relayed/cached off-chain only and are **never** accepted
+      on-chain (a leader-only-signed submission to Update must be rejected). (CONFIRM-014,
+      CONFIRM-018) — **TEST-29**
+- [ ] Desync recovery: a receiver whose local latest serial ≠ `nu' - 1` requests
+      `(fromSerial, toSerial)` from its **direct** leader only (no recursion to higher leaders),
+      verifies returned signatures and serial continuity before adopting. (CONFIRM-016,
+      CONFIRM-017) — **TEST-21**
+- [ ] Manual dispute-trigger entry point: any participant can invoke it explicitly; no automatic
+      detection thresholds (GAP-40). (CONFIRM-020)
+
+## M7 — State update rules (partial), dispute/offline/online/close basics
+
+**Requirements:** UPDATE-001, UPDATE-004, UPDATE-005 (+OFFLINE-010), UPDATE-007, DISPUTE-005,
+DISPUTE-009, DISPUTE-012, OFFLINE-005, OFFLINE-006, OFFLINE-010, OFFLINE-011..015, CLOSE-001..008
+
+**Do NOT implement yet:** UPDATE-002/003/006/008/009..012 (signer-count/leader-derivation/Rule-4
+mechanics — GAP-81/82/87), DISPUTE-001..004/006..008/010/011/013..019 (full dispute flow —
+GAP-88 residual, except the two Tier-A pieces below), OFFLINE-001..004/007..009/016 (the
+offline-detection/challenge-window mechanics — GAP-85 residual). Build exactly the Tier-A slices
+listed per test below; each is deliberately narrower than its protocol section.
+
+- [ ] **TEST-23** Rule 1: reject an Update submission with `nu <= nu*` (`nu*` = latest signed
+      state stored on-chain in the root instance, GAP-66). (UPDATE-004)
+- [ ] **TEST-24** / **TEST-36** Rule 2: reject an Update that changes the LocalState entry of a
+      participant currently in OffList (frozen entry). (UPDATE-005, OFFLINE-010)
+- [ ] **TEST-26** Rule 3 (validity slice only): reject an Update if any included signature fails
+      `Vrfy`. Do not yet build the exact-signer-count / leader-presence sub-checks (UPDATE-006,
+      UPDATE-008 — blocked). (UPDATE-007)
+- [ ] **TEST-29** reject a state on Update that carries only the leader's signature (a no-signed
+      state). (UPDATE-001, CONFIRM-018 — cross-reference with M6)
+- [ ] **TEST-30** `Alg4.CheckpointSelection`, no-children case only (`ChildList == null`):
+      implement the **prose semantics** (DEV-02), not the literal off-by-one listing — checkpoint
+      = the instance's latest signed round state. (DISPUTE-005, DISPUTE-009)
+- [ ] **TEST-47** new-leader selection: `index = uint(blockhash(block.number - 1)) mod
+      eligible-candidate-count`; candidates exclude the removed participant and finalized
+      OffList members (pending, unfinalized OfflineMsgs do not exclude). (DISPUTE-012)
+- [ ] **TEST-48** OfflineMsg signer-set check in isolation: exactly `n-1` valid signatures
+      (excluding `pi`) accepted, `n-2` rejected; `H(psi)` computed over `pi`'s **active**
+      LogCacheQueue including a partial batch (DEV-03, DEV-17). (OFFLINE-005, OFFLINE-006)
+- [ ] **TEST-37** online transition: `OnlineMsg` accepted **without** requiring `S_pi`;
+      acceptance removes `pi` from OffList; `pi`'s GlobalState and current-batch LogCacheQueue
+      are synced from its **direct leader only** (not "other servers in the domain" — DEV-12);
+      `pi`'s next batch chains from its frozen LocalState; `pi`'s log reader stays paused for the
+      whole time it was offline (EXPERIMENT-ONLY, GAP-69/LIM-01), so no backlog-ingestion logic
+      is needed or wanted. (OFFLINE-011..015)
+- [ ] **TEST-38** Close: a signed `(G_nu | Close)` via `CloseMsg` is accepted only with purpose
+      `CLOSE` signatures from **every** member of the instance's P, offline members included — a
+      single missing offline signer blocks the whole Close (LIM-03, intentional). Subsequent
+      Update on a closed instance is rejected; closed data stays readable (no cleanup).
+      (CLOSE-001..005)
+- [ ] **TEST-44** Close rejected outright while the instance has a non-null Parent (disassociate
+      first). (CLOSE-004, CLOSE-009)
+- [ ] **TEST-39** / **TEST-40** Disassociation: parent `Γa` with children `Γ1, Γ2` closes once
+      both child leaders submit signed close states (purpose CLOSE); each direct child's Parent
+      resets to null, children stay open; `DisassociateMsg` rejected while `Γa.Parent != null`
+      (LIM-04, no nested disassociation); a corrupted child signature leaves `Γa` open.
+      (CLOSE-006, CLOSE-007)
+- [ ] Audit-closure coupling: stopping the log reader/LSG is coupled with invoking Close; no
+      separate module teardown exists. (CLOSE-008)
+- [ ] **TEST-45** every accepted Update emits exactly one event carrying the full signed state;
+      the contract keeps **no** on-chain history array (SC-007 scope: event emission only, not
+      the auditor's cross-check consumer — that's still AUDIT-012, blocked).
+
+## M8 — Faithfulness review (run continuously; formal pass before declaring a milestone done)
+
+- [ ] **TEST-42**: walk SRS §26's 22-item prohibition list against the actual diff. Nothing on
+      that list should be findable anywhere in the implementation. Do this after each milestone,
+      not just once at the end.
+
+---
+
+## Explicitly BLOCKED — do not implement, do not "helpfully" unblock
+
+Reproduced from the SRS's own "Developer Handoff (revision 3)" so this tracker doesn't silently
+drift from it. If SRS gets a revision 4, re-sync this section from the new handoff before trusting
+it.
+
+**Tier B — blocked only by revision-3 residuals (GAP-82, 83, 84, 85, 86, 88, 89):**
+AUDIT-013; ARCH-006; INIT-001, 008, 009; CONFIRM-008, 009, 015; UPDATE-007; DISPUTE-010, 011, 015,
+019; OFFLINE-007, 008, 009, 016; CLOSE-001, 003, 004, 005, 006, 007, 009; CRYPTO-003, 005;
+NET-007, 008, 012, 017, 018, 021, 022, 023, 025, 026, 028, 029, 030, 036; SC-005; EXP-017, 022.
+
+*(Note: some of these IDs — e.g. UPDATE-007, CLOSE-001/003..007/009, OFFLINE-007/008/009 —
+overlap with Tier-A test coverage above only for the narrow slice a specific runnable test
+exercises. Where M6/M7 above carve out a Tier-A slice of one of these IDs, that slice is fine;
+everything else on the ID stays blocked.)*
+
+**Tier C — blocked by an OPEN gap or unresolved conflict (GAP-05, 20, 24, 81, 87):**
+SYS-004, 008; LSG-002, 003, 005; AUDIT-001, 005, 011, 012; ARCH-004, 008, 011; INIT-002..007;
+CONFIRM-003, 004, 010, 011, 012, 019; UPDATE-002, 003, 006, 008, 011, 012; DISPUTE-017; CRYPTO-006,
+007; NET-003, 009, 010, 014, 015, 016, 032, 033, 037; SC-007; PERSIST-003, 005; EXP-015, 018, 019,
+020, 021.
+
+**Open gaps (never resolve unilaterally — these need the user):**
+GAP-05 (LSG record-hash broadcast payload/ordering), GAP-20 (InitMsg aggregation + sid
+derivation), GAP-24 (upward propagation: forward-unchanged vs re-sign, what root distributes),
+GAP-81 (CONFLICT: every-anchor-on-chain vs periodic submission), GAP-87 (CONFLICT: one signature
+satisfying two roles vs role bound into signed bytes), GAP-88 (dispute checkpoint signature/vote
+binding details), GAP-82/83/84/85/86/89 (residuals listed in SRS "Blocked by User Decision
+(revision 3)" table).
+
+---
+
+## Open gaps found during development
+
+*(None yet. Add dated entries here — do not edit DELIA_REQUIREMENTS.md directly to record a new
+gap; that document is user-owned.)*
+
+## Verification log
+
+*(None yet. Each checked box should have a corresponding line here: date, box, what test/command
+demonstrated it.)*
