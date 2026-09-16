@@ -3,8 +3,11 @@
 **Authority:** `DELIA_REQUIREMENTS.md` in this directory is the governing document. This tracker
 is a work breakdown *only*; it never overrides the SRS. Where the two differ, the SRS wins. This
 file was seeded on 2026-09-16 directly from the SRS's own **"Developer Handoff (revision 3)"**
-section (near the end of the file) and the **"Tests runnable now"** list in §22. Nothing has been
-implemented yet — this is the first build pass.
+section (near the end of the file) and the **"Tests runnable now"** list in §22.
+
+**Status as of 2026-09-17:** M0-M4 are implemented and tested (see the checkboxes and
+Verification log below); M5-M8 are not started. See the end-of-run handoff in the session history
+for a full summary.
 
 **Read before working:** `DELIA_REQUIREMENTS.md` §1 (scope), §2 (source-of-truth rules, esp. 2.3
 "no unstated optimization" and 2.5 documented deviations DEV-01..20), §2.7 (documented limitations
@@ -58,20 +61,42 @@ package — it enumerates several of the §26 prohibitions again in package-spec
 **Requirements:** GO-001, GO-002, GO-004, SYS-001, SYS-002, SYS-003, SYS-005, SYS-006, SYS-007,
 DATA-018 (encoding half), CRYPTO-007 (encoding half), NET-033 (framing half)
 
-- [ ] Go module + the exact package skeleton above (`internal/` permitted for shared primitives
+- [x] Go module + the exact package skeleton above (`internal/` permitted for shared primitives
       not otherwise homed). No off-chain Java/JS component. (GO-001, GO-002)
-- [ ] Process model: one OS process per server, its own TLS endpoint, sequential protocol
+      — `go.mod` (module `delia`), packages `hash, sig, logcache, merkle, localstate, globalstate,
+      lsg, auditor, messages`, plus `internal/{spec,pki,nettransport,config,provision}` and
+      `cmd/provision`. `go build ./...` / `go vet ./...` clean. No Java/JS anywhere.
+- [x] Process model: one OS process per server, its own TLS endpoint, sequential protocol
       handler; in-process multi-node harness reserved for tests only (GAP-54). (GO-004)
+      — `internal/nettransport`: real TLS listener/dial + the GAP-47/73 frame codec; every
+      connection's frames funnel into one sequential dispatch goroutine (no worker pool). Tested
+      with a real localhost TLS handshake + multi-connection framing (`nettransport_test.go`).
+      The `lsg` package tests use a separate in-process synchronous hub, per GAP-54's "tests
+      only" carve-out. NOTE: no `cmd/delia-server` binary wires this to LSG/HMSC yet — nothing
+      meaningful to serve until GAP-05 (stage 1 broadcast) clears and HMSC (M5+) exists.
 - [ ] Deployment has exactly three entity kinds — server (LSG module + HMSC module), auditor,
       ledger node — no coordinator/broker/DB-server/cloud entity. (SYS-001, SYS-003, SYS-005)
-- [ ] Module structure maps onto the three layers: data (LogCacheQueue/LocalState/GlobalState),
+      — NOT CHECKED: nothing in the codebase violates this (no coordinator/broker/DB-server/cloud
+      package exists), but there is no complete running deployment yet to positively demonstrate
+      it against (no `cmd/delia-server`, no `cmd/delia-auditor`, no ledger). Revisit once M5+
+      produces real server/auditor binaries.
+- [x] Module structure maps onto the three layers: data (LogCacheQueue/LocalState/GlobalState),
       network (LSG/HMSC/ledger protocol), audit (Integrity Audit/Auditor Forensics). (SYS-006)
-- [ ] mTLS from a private test CA for server-to-server connections; P (participant set) comes
+      — data: `logcache/merkle/localstate/globalstate`; network: `lsg` +
+      `internal/{nettransport,pki}`; audit: `auditor`. HMSC's network half (M5+) not yet present.
+- [x] mTLS from a private test CA for server-to-server connections; P (participant set) comes
       from experiment config; one secp256k1 key per participant generated at provisioning.
       (SYS-002, GAP-48, GAP-49) — cert/key generation tooling belongs here.
+      — `internal/pki` (CA + mTLS leaf certs, TLS 1.2 min, tested with a real mutual handshake and
+      an untrusted-CA rejection test); `internal/provision` + `cmd/provision` (keygen + cert
+      issuance + `domain.json`, tested end-to-end incl. a CLI smoke run).
 - [ ] No separate log-collector/preprocessor/verifier components: "enable" = start the log
       reader that feeds LSG, "close" = stop it, coupled with Init and Close. (SYS-007, DEV-08)
-- [ ] **Create the normative test-vector / constants file** (GAP-73 implementer delegation —
+      — PARTIAL, left unchecked: `lsg.LogReader.Start/Stop` implements "enable"/"close" (tested:
+      `TestLogReaderStartStopLifecycle`). The "coupled with Init and Close" half cannot be built
+      or demonstrated yet — Init is entirely Tier C (GAP-20 OPEN) and Close is M7 (not reached
+      this run).
+- [x] **Create the normative test-vector / constants file** (GAP-73 implementer delegation —
       noted in the SRS as awaiting final user confirmation but treated as decided/frozen for
       implementation). Freeze in one place, with test vectors:
       - one-byte purpose codes: STATE, CLOSE, RECOVERY, VOTE
@@ -87,46 +112,71 @@ DATA-018 (encoding half), CRYPTO-007 (encoding half), NET-033 (framing half)
         message-specific fields`, raw bytes not hex (GAP-47; message_type codes delegated here)
       Document this file's own authority note: these are implementer-frozen choices per GAP-73,
       not paper-mandated. (DATA-018, CRYPTO-007, NET-033)
+      — `internal/spec` (`spec.go`, `frame.go`, `spec_test.go`): purpose codes, message_type
+      codes, GAP-73 GlobalState layout (implemented in `globalstate.Encode/Decode`), signed-bytes
+      layout helper, record hash rule (`logcache.RecordHash`), frame codec. Authority note is the
+      package doc comment. Cross-package normative vector test included.
 
 ## M1 — Cryptographic primitives & signing
 
 **Requirements:** CRYPTO-001, CRYPTO-002, CRYPTO-004, CRYPTO-008, CRYPTO-009
 
-- [ ] `H(.)` = SHA-256 via `crypto/sha256`, and it is the *only* hash in the system — used at
+- [x] `H(.)` = SHA-256 via `crypto/sha256`, and it is the *only* hash in the system — used at
       every cited call site (record hash, Eq. (2), Alg. 1-3, `H(psi)` in OfflineResolving).
       (CRYPTO-001, CRYPTO-002)
-- [ ] `sig` package: `Gen/Sign/Vrfy` over secp256k1 ECDSA on a SHA-256 digest. This is an
+      — `hash.H`; used by `logcache.RecordHash`, `merkle.MHTGen`, `localstate.Compute`,
+      `globalstate`, `auditor.LogVerify`. `H(psi)` in OfflineResolving is M7, not reached.
+- [x] `sig` package: `Gen/Sign/Vrfy` over secp256k1 ECDSA on a SHA-256 digest. This is an
       implementation decision (paper only permits ECDSA as an example) — record it as such.
       (CRYPTO-004)
-- [ ] Ethereum address = the address derived from a participant's one secp256k1 key; no second
+      — `sig.Gen/Sign/Vrfy`, documented as IMPL/GAP-27(b) in the package doc, not paper-mandated.
+- [x] Ethereum address = the address derived from a participant's one secp256k1 key; no second
       identity mapping. This is what OffList/NewLeader/OnlineMsg "addresses" mean. (CRYPTO-008)
-- [ ] Key generation at provisioning, local private-key storage, no runtime PKI. (CRYPTO-009)
+      — `sig.KeyPair.Address` / `sig.AddressFromPublicKey`, tested for consistency between the two
+      derivation paths.
+- [x] Key generation at provisioning, local private-key storage, no runtime PKI. (CRYPTO-009)
+      — `sig.KeyPair.Bytes/Load` round trip; wired into `internal/provision` for actual
+      provisioning-time generation + local file storage.
 - [ ] Note for later milestones: `Sign`/`Vrfy` callers use the M0 signed-bytes layout
       (`purpose || signer_role || encoding`). **LIM-02**: signatures are deliberately not bound
       to `sid` — do not "fix" this; it is a documented, accepted limitation, not a bug.
+      — Left unchecked: informational note for M6+ callers (none exist yet); nothing in the
+      current code binds a signature to `sid`, so LIM-02 is not violated so far.
 
 ## M2 — Data structures: LogCacheQueue, Merkle/LocalState, GlobalState
 
 **Requirements:** DATA-001..017 (DATA-018 encoding lives in M0)
 
-- [ ] `logcache`: `psi_{pi,li}` = ordered sequence of exactly `theta` record-hash digests in
+- [x] `logcache`: `psi_{pi,li}` = ordered sequence of exactly `theta` record-hash digests in
       record order, duplicates kept, no deduplication. `theta` is required configuration with no
       global default — a node started without it refuses to run. (DATA-001..007)
-- [ ] Every server retains every other server's current-batch LogCacheQueue (domain-wide scope).
+      — `logcache.New` rejects `theta <= 0`; `Append` builds an ordered, duplicate-preserving
+      sequence; tested (`TestDuplicatesKeptNoDeduplication`, `TestAppendBatchBoundaries`).
+- [x] Every server retains every other server's current-batch LogCacheQueue (domain-wide scope).
       (DATA-006)
-- [ ] `merkle.MHTGen(psi)`: leaves = the psi digests as-is (not re-hashed), in record order;
+      — `logcache.Store` keys batches per `ServerID`; tested directly
+      (`TestDomainWideSeparatePerServer`) and via `lsg` nodes each holding every other
+      participant's current psi.
+- [x] `merkle.MHTGen(psi)`: leaves = the psi digests as-is (not re-hashed), in record order;
       internal node = `SHA256(left || right)` over raw 32-byte digests; odd node count at a
       level duplicates the last node; deterministic. Test vectors: theta=3 →
       `H(H(L1||L2) || H(L3||L3))`; theta=1 → root = the single leaf (no self-hash at the root
       for a single-leaf tree — GAP-74). (DATA-008, DATA-009)
-- [ ] `localstate`: Eq. (2) — `li = 0`: `omega = H(root)` (raw 32-byte root as input); `li > 0`:
+      — `merkle.MHTGen`; both frozen vectors plus theta=4 checked byte-for-byte
+      (`merkle_test.go`), determinism and any-leaf-change-alters-root also tested.
+- [x] `localstate`: Eq. (2) — `li = 0`: `omega = H(root)` (raw 32-byte root as input); `li > 0`:
       `omega = H(root || omega_prev)` (root first, 64-byte raw concatenation). (DATA-010,
       DATA-011, DATA-012)
-- [ ] `globalstate`: `G_nu` = array of exactly `n` LocalState entries, positions fixed by the P
+      — `localstate.Compute`; TEST-03/TEST-04 vectors, operand-order test.
+- [x] `globalstate`: `G_nu` = array of exactly `n` LocalState entries, positions fixed by the P
       order frozen at Init. `G_0` = all n positions set to the all-zero 32-byte sentinel,
       `nu = 0`, never submitted on-chain; the first *generated* state is `G_1`. A server's slot
       stays the zero sentinel until its first completed batch — that sentinel is never treated
       as a produced LocalState (GAP-75, consumed later by Alg. 3 in M4). (DATA-013..017)
+      — `globalstate.Zero/GlobalState.Encode/Decode/Equal`; tested (`TestZeroState`,
+      `TestEncodeDecodeRoundTrip`, `TestEncodeLayout`, `TestEqualComparesNu`). "Never submitted
+      on-chain" has no positive test yet (nothing submits to a chain — M5+); no code path submits
+      `G_0` either, so not violated.
 
 ## M3 — LSG stage 2, Algorithm 1 (GlobalGen), Algorithm 2 (StateVerify)
 
@@ -137,28 +187,41 @@ xi/li fields, out-of-order/missing handling) — blocked by **GAP-05 (OPEN)**. B
 against an already-populated `psi` (however it got there in a test harness); do not invent the
 wire format for stage-1 broadcasts.
 
-- [ ] LSG runs only at the network layer (no ledger interaction in this package). A server
+- [x] LSG runs only at the network layer (no ledger interaction in this package). A server
       stores its own record hash in its own LogCacheQueue too. (LSG-001, LSG-004)
-- [ ] Stage 2 trigger: batch `li` full → `MHTGen(psi)` → `Alg1(root, G_{nu-1})` → broadcast
+      — `lsg.LogReader` (no chain/contract imports anywhere in `lsg`); tested
+      (`TestLogReaderStoresOwnHashes`).
+- [x] Stage 2 trigger: batch `li` full → `MHTGen(psi)` → `Alg1(root, G_{nu-1})` → broadcast
       `(root, G_nu)`. No GlobalState is generated for a partial batch. (LSG-006, LSG-007)
-- [ ] Receiver calls `Alg2` with its **own** locally maintained psi and `G_{nu-1}` — never a
+      — `lsg.Node.Propose`; tested (`TestStage2HonestProposalAdoptedByAll`,
+      `TestLogReaderNoPartialBatchTrigger`).
+- [x] Receiver calls `Alg2` with its **own** locally maintained psi and `G_{nu-1}` — never a
       psi/state supplied by the proposer. Invalid → broadcast failure notification
       `(sender, pi, nu, reason)`, abort this attempt, no dispute invoked, recipients only record
       it. Valid → replace local `G_{nu-1}` with `G_nu` (provisional until HMSC confirmation,
       DEV-07). (LSG-008, LSG-009, LSG-010, LSG-011)
-- [ ] Concurrent-proposal handling: the losing proposer re-runs Alg. 1 against the newly accepted
+      — `lsg.Node.Receive`; tested (`TestStage2CorruptedProposalRejected`, checks the failure
+      notification's exact `(sender, proposer, nu)` fields and that receivers keep `G_{nu-1}`).
+- [x] Concurrent-proposal handling: the losing proposer re-runs Alg. 1 against the newly accepted
       state and proposes again; no merge (DEV-07). TEST-43 covers this but is itself blocked by
       GAP-05 (needs the wire format) — build the re-proposal *logic* now, wire it to stage-1 once
       GAP-05 clears.
-- [ ] `ALG1.GlobalGen(root, G_{nu-1})`: parse n entries, `omega_i = H(root || omega_{i,prev})`,
+      — `lsg.Node.Reconcile`; tested (`TestStage2ConcurrentProposalReconciles`: only the losing
+      proposer's own entry changes, network converges on one chain). The caller (currently the
+      test) supplies which state "won" a conflict, since that ordering is HMSC Confirm's job
+      (blocked); ready to wire to a real conflict signal once GAP-05/M6 land.
+- [x] `ALG1.GlobalGen(root, G_{nu-1})`: parse n entries, `omega_i = H(root || omega_{i,prev})`,
       copy all other entries unchanged, return `G_nu` (nu = input serial + 1). Apply the Eq. (2)
       `li=0` branch in full — `H(root)`, not `H(root || zero-digest)` (DEV-13, TEST-05b). Caller
       supplies index `i` (the generating server's position in the frozen P order) — it is not
       derivable from the inputs alone. (ALG1-001..006)
-- [ ] `ALG2.StateVerify(psi, root, G_{nu-1}, G_nu)`: recompute `root'` fresh every call (no
+      — `globalstate.GlobalGen`; TEST-05/TEST-05b covered, plus out-of-range index rejection.
+- [x] `ALG2.StateVerify(psi, root, G_{nu-1}, G_nu)`: recompute `root'` fresh every call (no
       cache); mismatch → return 0 **before** calling GlobalGen; else call `GlobalGen` and compare
       the full canonical encoding of `(nu, entries)` — `nu` is part of the comparison, `sid` is
       not. (ALG2-001..007)
+      — `globalstate.StateVerify`; TEST-06/07/08(a,b,c) covered, incl. a call-count spy proving
+      GlobalGen is not invoked after a root mismatch.
 
 ## M4 — Algorithm 3 / Audit — structural requirements only
 
@@ -171,22 +234,33 @@ end-to-end retrieval path (fetching `{G_1..G_nu}` from a server, cross-checking 
 Ethereum event logs). Build `LogVerify` as a pure function over an in-memory record slice and an
 in-memory `{G_1..G_nu}` slice supplied by the caller/test harness.
 
-- [ ] Periodic audit trigger with a configured period; on-demand is a test/CLI-only trigger
+- [x] Periodic audit trigger with a configured period; on-demand is a test/CLI-only trigger
       (DEV-09). (AUDIT-002)
-- [ ] `auditor.LogVerify({records}, {G_1..G_nu}) -> ErrList`, signature matches Alg. 3.
+      — `auditor.Scheduler` (`Start/Stop` periodic + separate `TriggerNow`, passes never overlap);
+      tested (`TestSchedulerRunsPeriodically`, `TestSchedulerTriggerNow`, `TestSchedulerNoOverlap`).
+- [x] `auditor.LogVerify({records}, {G_1..G_nu}) -> ErrList`, signature matches Alg. 3.
       (AUDIT-003)
-- [ ] `l` initialized once before the outer loop, never reset per `k` (DEV-01); `k++` after each
+      — `auditor.LogVerify(records []Record, theta, index int, states []State) []uint64`.
+- [x] `l` initialized once before the outer loop, never reset per `k` (DEV-01); `k++` after each
       `G_k`, `l++` per reconstructed batch, single linear pass, every batch rebuilt exactly once.
       (AUDIT-004, AUDIT-006)
-- [ ] Comparison against the printed indentation: after reconstructing up to the current `li`,
+      — verified by instrumentation (`TestLogVerifyInstrumentation`: exactly one `H` per record,
+      one `MHTGen` per rebuilt batch, across the whole run).
+- [x] Comparison against the printed indentation: after reconstructing up to the current `li`,
       mismatch → add `li` to `ErrList`, then unconditionally resume the chain from the ledger
       value. While a server's slot is still the `G_0` zero sentinel (no completed batch yet), no
       comparison is made (GAP-75). (AUDIT-007)
-- [ ] Return `ErrList`; empty ⇔ audit passes; it carries only batch numbers, nothing else.
+      — TEST-11/12/13 (`TestLogVerifyValidLogs`, `TestLogVerifyTamperedBatch`,
+      `TestLogVerifyDeletedRecord`/`InsertedRecord`/`TrailingPartialIgnored`) and the GAP-75 skip
+      (`TestLogVerifySkipsZeroSentinel`).
+- [x] Return `ErrList`; empty ⇔ audit passes; it carries only batch numbers, nothing else.
       (AUDIT-008, AUDIT-009)
-- [ ] Single goroutine, no caching, no Merkle proofs/multiproofs/binary search — instrument and
+      — `[]uint64` of batch numbers only; empty-list case tested.
+- [x] Single goroutine, no caching, no Merkle proofs/multiproofs/binary search — instrument and
       test this directly (one `H` per record per rebuilt batch, one `MHTGen` per inner
       iteration, zero `go` statements). (AUDIT-010, GO-003) — **TEST-14**
+      — `auditor/logverify.go` contains zero `go` statements (code review); call-count
+      instrumentation above is TEST-14.
 
 ## M5 — HMSC architecture scaffolding + Solidity contract skeleton
 
@@ -319,6 +393,16 @@ listed per test below; each is deliberately narrower than its protocol section.
 - [ ] **TEST-42**: walk SRS §26's 22-item prohibition list against the actual diff. Nothing on
       that list should be findable anywhere in the implementation. Do this after each milestone,
       not just once at the end.
+      — Left unchecked (this item covers the whole project, not one pass): a full 22-item review
+      was done against the M0-M4 diff (`hash, sig, logcache, merkle, localstate, globalstate, lsg,
+      auditor, messages, internal/*, cmd/provision`) on 2026-09-17 — no caching beyond Eq.(2)/
+      Alg.1-3, no alternative Merkle structures/proofs, no dedup, no record-hash batching, no
+      goroutines inside Alg.1-4 (only I/O concurrency in `lsg.LogReader`/`nettransport`/
+      `auditor.Scheduler`, all sequential-handler/no-overlap by design), no binary-search audit, no
+      alternative election/consensus libs, no signature aggregation, no on-chain Close challenge,
+      no REST/gRPC/queues as DELIA wire messages (JSON is used only for the local `internal/config`
+      deployment file, documented as tooling not a DELIA requirement), no Go-simulated ledger (none
+      built yet). Re-run this walk after every later milestone before checking the box.
 
 ---
 
@@ -356,10 +440,36 @@ binding details), GAP-82/83/84/85/86/89 (residuals listed in SRS "Blocked by Use
 
 ## Open gaps found during development
 
-*(None yet. Add dated entries here — do not edit DELIA_REQUIREMENTS.md directly to record a new
-gap; that document is user-owned.)*
+No new protocol gap was hit during M0-M4 (2026-09-17): every choice made was already licensed by
+a DECIDED gap (mostly GAP-73's implementer delegation — see `internal/spec`'s package doc for the
+specific frozen values: 33-byte compressed secp256k1 public-key encoding, purpose/message_type
+byte values, 64 MiB frame size cap). Nothing here needed to go back to the user.
+
+**Development-environment note (not a protocol gap):** this machine's local gcc cannot compile
+64-bit cgo output ("sorry, unimplemented: 64-bit mode not compiled in"), which breaks
+`go-ethereum/crypto`'s default cgo secp256k1 path. All `go build`/`go vet`/`go test` invocations in
+this repo were run with `CGO_ENABLED=0`, which selects go-ethereum's pure-Go secp256k1
+implementation instead — same algorithm, no protocol effect, but anyone (including the tester
+agent) re-running these commands on this machine needs the same env var or will hit the same
+build failure. Worth fixing at the toolchain level eventually, but out of scope for this tracker.
 
 ## Verification log
 
-*(None yet. Each checked box should have a corresponding line here: date, box, what test/command
-demonstrated it.)*
+All commands below were run with `CGO_ENABLED=0` (see the environment note above) from
+`systems/delia`. `go build ./...`, `go vet ./...` and `go test ./...` are clean across the whole
+module as of 2026-09-17 (13 test packages, 0 failures).
+
+- 2026-09-17, M0 box 1 (module/package skeleton): `go build ./...`, `go vet ./...` clean.
+- 2026-09-17, M0 box 2 (process model): `go test ./internal/nettransport/...` —
+  `TestServeAndSendRoundTrip`, `TestServeMultipleConnections` (real TLS handshake + framing).
+- 2026-09-17, M0 box 4 (module/layer mapping): code review of package layout against SYS-006.
+- 2026-09-17, M0 box 5 (mTLS + provisioning tooling): `go test ./internal/pki/...` (incl.
+  `TestMutualTLSHandshake`, `TestMutualTLSRejectsUntrustedClient`) and
+  `go test ./internal/provision/...`; CLI smoke test via `go run ./cmd/provision ...`.
+- 2026-09-17, M0 box 7 (normative test-vector file): `go test ./internal/spec/...`.
+- 2026-09-17, M1 (crypto/sig, all 4 checked boxes): `go test ./hash/... ./sig/...`.
+- 2026-09-17, M2 (data structures, all 5 boxes): `go test ./logcache/... ./merkle/... ./localstate/... ./globalstate/...`.
+- 2026-09-17, M3 (LSG stage 2 + Alg.1/2, all 6 boxes): `go test ./lsg/... ./globalstate/...`.
+- 2026-09-17, M4 (Algorithm 3 / audit, all 6 boxes): `go test ./auditor/...` (incl.
+  `TestLogVerifyInstrumentation` for TEST-14's call-count requirement and
+  `TestSchedulerNoOverlap`/`TestSchedulerRunsPeriodically` for AUDIT-002).
