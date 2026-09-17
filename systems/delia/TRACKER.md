@@ -337,14 +337,22 @@ only.
 **Requirements:** CONFIRM-001, CONFIRM-002, CONFIRM-005, CONFIRM-006, CONFIRM-007, CONFIRM-013,
 CONFIRM-014, CONFIRM-016, CONFIRM-017, CONFIRM-018, CONFIRM-020
 
-**Do NOT implement yet:** CONFIRM-003, CONFIRM-004, CONFIRM-008..012, CONFIRM-015, CONFIRM-019 —
-blocked (GAP-81/GAP-82/GAP-24 OPEN). This is a narrower cut than it looks: **TEST-17** and
+**Do NOT implement yet:** CONFIRM-003, CONFIRM-004, **CONFIRM-008, CONFIRM-009** (correction,
+2026-09-17: these two are Tier **B**, not Tier A — blocked by residual **GAP-86**, the signer-role
+enumeration; an earlier version of this tracker wrongly listed them as buildable in the bullet
+below, and the developer agent started staging role-byte constants for them before a tester pass
+caught it — see the Verification log entry below and `internal/spec/spec.go`'s history),
+CONFIRM-010, CONFIRM-011, CONFIRM-012, CONFIRM-015, CONFIRM-019 — blocked
+(GAP-81/GAP-82/GAP-24 OPEN/GAP-86). This is a narrower cut than it looks: **TEST-17** and
 **TEST-17b** (basic off-chain leader rotation, including OffList-skip) are explicitly listed as
 runnable now even though the full CONFIRM-003/004 requirement rows are gated — build the *basic*
 election rule those two tests need; do NOT build the SCC on-chain "expected leader derived from
 the latest accepted signed-round anchor" mechanic (that part of CONFIRM-003/004 is what's
 actually blocked), and do NOT build parent/child upward-propagation recursion (CONFIRM-010/011/012,
-GAP-24 OPEN).
+GAP-24 OPEN). **Also do not implement the leader's actual `(G_nu, S_leader)` signing/broadcast
+step or a recipient's countersignature step** — that's exactly CONFIRM-008/009, and per the SRS's
+own "Tests runnable now" list, **TEST-18** (the test that would exercise it) is *not* on that list
+either, so there is no concrete Tier-A target for it yet regardless of the ID classification.
 
 - [ ] At most one leader per instance at any time; every participant gets equal opportunity
       across rounds. (CONFIRM-001, CONFIRM-002)
@@ -354,15 +362,17 @@ GAP-24 OPEN).
       `K1, K2, K3, K1` over 4 rounds.
 - [ ] **TEST-17b** (DEV-11): same rotation, but a participant in the *finalized* on-chain OffList
       is skipped; a merely *pending, unfinalized* OfflineMsg must **not** affect eligibility.
-- [ ] Signed round state, single instance, 3-step flow: participant sends `G_nu` to its leader →
-      leader signs `(purpose=STATE, ...)` and broadcasts `(G_nu, S_leader)` → each recipient
-      verifies `S_leader` (a bad signature produces no countersignature) and produces its own
-      countersignature. (CONFIRM-005, CONFIRM-007, CONFIRM-008, CONFIRM-009, CONFIRM-013) —
-      **TEST-18 needs the role-set from GAP-86 (open) for full verification; build only the
-      single-instance flow this milestone's Tier-A items need, not the hierarchy/parent parts.**
+- [ ] `NET-006` message plumbing only: a participant can send its generated `G_nu` to its current
+      leader (CONFIRM-007 — a plain message send, no signature semantics). This is legitimate
+      Tier-A scaffolding *only* if it stays a dumb message send — do not attach any signing logic
+      to the leader's receipt of it; that's CONFIRM-008, still blocked. Leave CONFIRM-005 and
+      CONFIRM-013 (which describe properties of the *complete* signed-round-state flow) as
+      unchecked design notes, not deliverables, until CONFIRM-008/009 unblock — there is no way to
+      demonstrate them without the signing step they describe.
 - [ ] No-signed round states are relayed/cached off-chain only and are **never** accepted
-      on-chain (a leader-only-signed submission to Update must be rejected). (CONFIRM-014,
-      CONFIRM-018) — **TEST-29**
+      on-chain (a leader-only-signed submission to Update must be rejected). Scope this to a
+      single instance only — general upward relay through a hierarchy (CONFIRM-014's "recursively")
+      is GAP-24 OPEN territory. (CONFIRM-018 single-instance slice) — **TEST-29**
 - [ ] Desync recovery: a receiver whose local latest serial ≠ `nu' - 1` requests
       `(fromSerial, toSerial)` from its **direct** leader only (no recursion to higher leaders),
       verifies returned signatures and serial continuity before adopting. (CONFIRM-016,
@@ -570,3 +580,25 @@ M5-M8 scope creep).
 No M0-M4 box was unchecked. No new protocol gap or scope-creep issue was found; the LSG-002/003/005
 stage-1 broadcast wire format remains correctly unimplemented (GAP-05 still OPEN), and no HMSC/chain
 code exists yet.
+
+### Tracker correction (2026-09-17, orchestrating session)
+
+The tester's scope-creep item traced back to a drafting error in this tracker's own M6 section,
+not to a developer mistake: M6 had listed CONFIRM-008 and CONFIRM-009 (the leader's actual
+`(G_nu, S_leader)` signing/broadcast step and a recipient's countersignature step) as part of a
+buildable "signed round state, single instance" bullet, while M6's own "Do NOT implement yet"
+callout directly above it *correctly* named CONFIRM-008..012 as blocked — a direct
+self-contradiction. Per the SRS's own Developer Handoff (revision 3), CONFIRM-008/009 are Tier
+**B**, blocked on residual GAP-86 (the signer-role enumeration isn't frozen), not Tier A. Separately,
+**TEST-18** — the only test that would exercise that signed-round-state flow — is not on the SRS's
+own "tests runnable now" list either, so there was never a concrete Tier-A target for it regardless
+of the ID's tier. The uncommitted `internal/spec/spec.go` edit the tester found (staging
+`RoleLeader`/`RoleParticipant` role-byte constants, citing CONFIRM-008/009 directly) was the
+developer agent correctly following this tracker's incorrect instruction. Fixed M6 above: CONFIRM-
+008/009 moved to the blocked list; the bullet demoted to plumbing-only (a bare `G_nu`-to-leader
+message send, CONFIRM-007) plus unchecked design notes (CONFIRM-005/013) that can't be
+demonstrated until CONFIRM-008/009 unblock. The stray `RoleLeader`/`RoleParticipant` constants in
+`internal/spec/spec.go` were left for the next developer pass to remove (or explicitly re-justify
+as reversible pre-staging, per the tester's own recommendation) rather than being touched here —
+this session edits the tracker, not implementation code, per the same separation of concerns the
+tester and developer agents observe.
