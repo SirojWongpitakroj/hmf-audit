@@ -61,10 +61,23 @@ const (
 
 // SignerRole is the one-byte signer-role tag bound into a signed object's
 // bytes (GAP-72/GAP-73). The complete enumeration is OPEN (GAP-86 residual);
-// no concrete values are frozen here because no Tier-A call site signs
-// anything yet. Future milestones add named constants here as they need
-// them, never redefine an already-frozen value.
+// concrete values are frozen here only as a Tier-A call site actually needs
+// one. Future milestones add named constants here as they need them, never
+// redefine an already-frozen value.
 type SignerRole byte
+
+// RoleSigner is the one-byte signer-role tag used by every M6/M7 Tier-A
+// signature this reproduction verifies so far: a participant's signature on
+// a signed round state submitted to Update (purpose STATE; UPDATE-007,
+// TEST-23/24/26/29/36), and a participant's signature on a Close/Disassociate
+// state (purpose CLOSE; CLOSE-005/007, TEST-38/39/40/44). It deliberately
+// does NOT distinguish leader from participant — that distinction
+// (UPDATE-008's leader-presence sub-check, CONFIRM-008/009's leader-signs-
+// then-participants-countersign flow) is Tier B/blocked (GAP-86 residual)
+// and is not built by any Tier-A item. Do not reuse this constant for a
+// signing point that DOES need a leader/participant distinction; freeze a
+// new, separately-justified role for that when it actually unblocks.
+const RoleSigner SignerRole = 0x01
 
 // MessageType is the one-byte off-chain frame message-type code (GAP-47,
 // GAP-73). Only codes needed by an implemented Tier-A message are assigned.
