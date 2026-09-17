@@ -86,3 +86,49 @@ func TestDecodeFailureNotificationRejectsShortInput(t *testing.T) {
 		t.Fatalf("expected error for short FailureNotification payload")
 	}
 }
+
+// NET-006/CONFIRM-007: StateToLeader is a plain, unsigned send of a
+// participant's generated G_nu to its leader.
+func TestStateToLeaderEncodeDecode(t *testing.T) {
+	g := globalstate.GlobalState{Nu: 3, Entries: []hash.Digest{hash.H([]byte("p"))}}
+	m := StateToLeader{State: g}
+
+	enc := m.Encode()
+	got, err := DecodeStateToLeader(enc)
+	if err != nil {
+		t.Fatalf("DecodeStateToLeader: %v", err)
+	}
+	if !got.State.Equal(g) {
+		t.Fatalf("state mismatch")
+	}
+}
+
+func TestStateToLeaderOverFrame(t *testing.T) {
+	g := globalstate.GlobalState{Nu: 1, Entries: []hash.Digest{hash.H([]byte("q"))}}
+	m := StateToLeader{State: g}
+
+	var buf bytes.Buffer
+	if err := spec.WriteFrame(&buf, TypeStateToLeader, m.Encode()); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	typ, payload, err := spec.ReadFrame(&buf)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	if typ != TypeStateToLeader {
+		t.Fatalf("type mismatch")
+	}
+	got, err := DecodeStateToLeader(payload)
+	if err != nil {
+		t.Fatalf("DecodeStateToLeader: %v", err)
+	}
+	if !got.State.Equal(g) {
+		t.Fatalf("round trip through frame mismatched")
+	}
+}
+
+func TestDecodeStateToLeaderRejectsShortInput(t *testing.T) {
+	if _, err := DecodeStateToLeader([]byte{0x01, 0x02}); err == nil {
+		t.Fatalf("expected error for short StateToLeader payload")
+	}
+}

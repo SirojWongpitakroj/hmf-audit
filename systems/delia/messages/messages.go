@@ -88,6 +88,30 @@ func DecodeFailureNotification(b []byte) (FailureNotification, error) {
 	}, nil
 }
 
+// StateToLeader is NET-006 (CONFIRM-007 Step 1): participant -> its current
+// leader, a plain send of the participant's generated G_nu. This is
+// deliberately a dumb message: no signature is attached here or verified on
+// receipt (that is CONFIRM-008/009's leader-signs/countersigns step, Tier B,
+// blocked by residual GAP-86 — see hmsc/confirm's package doc comment).
+type StateToLeader struct {
+	State globalstate.GlobalState
+}
+
+// Encode serializes StateToLeader as GlobalState.Encode() alone (no other
+// fields — a bare state send, GAP-47/73).
+func (m StateToLeader) Encode() []byte {
+	return m.State.Encode()
+}
+
+// DecodeStateToLeader parses the StateToLeader payload produced by Encode.
+func DecodeStateToLeader(b []byte) (StateToLeader, error) {
+	state, err := globalstate.Decode(b)
+	if err != nil {
+		return StateToLeader{}, err
+	}
+	return StateToLeader{State: state}, nil
+}
+
 // Type re-exports the frozen frame message_type enumeration (GAP-47/73).
 type Type = spec.MessageType
 
@@ -95,4 +119,5 @@ type Type = spec.MessageType
 const (
 	TypeRootState           = spec.MsgRootState
 	TypeFailureNotification = spec.MsgFailureNotification
+	TypeStateToLeader       = spec.MsgStateToLeader
 )

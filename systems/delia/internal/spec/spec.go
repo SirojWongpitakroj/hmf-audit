@@ -90,6 +90,11 @@ const (
 	// MsgFailureNotification carries NET-005: (sender, pi, nu, reason), the
 	// LSG stage 2 failure notification (LSG-009, GAP-12(a)).
 	MsgFailureNotification MessageType = 0x02
+	// MsgStateToLeader carries NET-006: a participant's G_nu, sent to its
+	// current leader (CONFIRM-007 Step 1). This is a plain, unsigned message
+	// send — no signing/verification semantics are attached at this
+	// milestone (that belongs to CONFIRM-008/009, Tier B, GAP-86 residual).
+	MsgStateToLeader MessageType = 0x03
 )
 
 // SignedBytes builds the digest input for a signature under the GAP-72/73
