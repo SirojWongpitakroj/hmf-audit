@@ -5,9 +5,11 @@ is a work breakdown *only*; it never overrides the SRS. Where the two differ, th
 file was seeded on 2026-09-16 directly from the SRS's own **"Developer Handoff (revision 3)"**
 section (near the end of the file) and the **"Tests runnable now"** list in §22.
 
-**Status as of 2026-09-17:** M0-M4 are implemented and tested (see the checkboxes and
-Verification log below); M5-M8 are not started. See the end-of-run handoff in the session history
-for a full summary.
+**Status as of 2026-09-18:** M0-M4 are implemented and tested. M5, M6 and all of M7's scoped
+bullets are now also implemented and tested (see the checkboxes and Verification log below). M8's
+TEST-42 faithfulness review is a continuous item re-run after this pass too (see its note); it
+stays unchecked by design (it covers the whole project, not one milestone). See the end-of-run
+handoff in the session history for a full summary of this pass.
 
 **Tester sign-off (2026-09-17):** an independent tester agent re-verified every `- [x]` box in
 M0-M4 by writing and running its own tests (not just reading the developer's tests/notes) — see
@@ -132,25 +134,21 @@ DATA-018 (encoding half), CRYPTO-007 (encoding half), NET-033 (framing half)
       layout helper, record hash rule (`logcache.RecordHash`), frame codec. Authority note is the
       package doc comment. Cross-package normative vector test included.
 
-- [ ] **Tester-filed (2026-09-17), scope-creep check on the M0 box above:** at verification time,
-      `internal/spec/spec.go` had an *uncommitted* working-tree change (not part of any commit on
-      this branch) adding `SignerRole` constants `RoleLeader = 0x01` / `RoleParticipant = 0x02`,
-      with a doc comment explicitly citing CONFIRM-008/CONFIRM-009 and labelling them "M6 Tier-A
-      scope". CONFIRM-008 and CONFIRM-009 are on M6's own "Do NOT implement yet" list
-      (blocked by GAP-81/GAP-82/GAP-24 OPEN) and M6 has not been started (all its boxes are still
-      `- [ ]`). Neither constant is referenced anywhere else in the tree (`grep -rn
-      "RoleLeader\|RoleParticipant"` returns only the two declarations) — no M0-M4 logic depends on
-      them, so no M0-M4 checked box's actual claim is affected and none was unchecked over this.
-      But the constants themselves reach past the box's own documented scope ("freeze only the
-      roles a Tier-A item actually needs" — no Tier-A/M0-M4 item needs these two) and into M6's
-      explicitly-blocked IDs. Action needed: either remove the two constants until M6 actually
-      starts, or, if the developer wants to keep them as inert scaffolding, get that logged as a
-      documented, reversible call (per the developer agent's own ambiguity-handling rule) rather
-      than left as a silent uncommitted diff — and either way this should be committed or reverted,
-      not left dangling uncommitted. Not a failure of the M0 box above (its own documented content
-      — purpose codes, message types, GlobalState layout, signed-bytes helper, record hash rule,
-      frame codec — is all present, tested, and unaffected); filed as a separate item because it is
-      additional content the box never claimed.
+- [x] **Tester-filed (2026-09-17), scope-creep check on the M0 box above — RESOLVED 2026-09-18:**
+      at verification time, `internal/spec/spec.go` had an *uncommitted* working-tree change (not
+      part of any commit on this branch) adding `SignerRole` constants `RoleLeader = 0x01` /
+      `RoleParticipant = 0x02`, with a doc comment explicitly citing CONFIRM-008/CONFIRM-009 and
+      labelling them "M6 Tier-A scope". CONFIRM-008 and CONFIRM-009 are on M6's own "Do NOT
+      implement yet" list (Tier B, GAP-86 residual per the 2026-09-17 tracker correction below) and
+      M6 had not been started. Neither constant was referenced anywhere else in the tree.
+      — Resolved by reverting the uncommitted diff outright (`git checkout -- internal/spec/spec.go`
+      before any other work this session) — with the M6 tracker correction already in place,
+      CONFIRM-008/009 stayed Tier B for the whole of this run too, so there was no live
+      justification left for those two constants at any point. `internal/spec/spec.go` later gained
+      a *different*, narrower constant, `RoleSigner = 0x01` — a single generic signer-role value
+      that M6/M7's actual Tier-A Update/Close/Disassociate signature verification needs (it does
+      NOT distinguish leader from participant, unlike the reverted pair, so it doesn't reach into
+      CONFIRM-008/009's blocked territory). See the M5 commit and the Verification log below.
 
 ## M1 — Cryptographic primitives & signing
 
@@ -307,30 +305,64 @@ Tier B) — this means the on-chain leader-rotation-from-anchor bookkeeping and 
 state it needs stay out of scope here; build the plain instance struct and deployment plumbing
 only.
 
-- [ ] `Γ` instance representation `{sid, P, G, OffList, NewLeader, Parent, ChildList}` — exactly
+- [x] `Γ` instance representation `{sid, P, G, OffList, NewLeader, Parent, ChildList}` — exactly
       these seven fields as contract storage (extra state, if any, is out of scope until
       ARCH-011 clears). (ARCH-003)
-- [ ] SCC comprises six *named* protocols (Init, Confirm, Update, DisputeResolving,
+      — `contracts/HMSC.sol`'s `Instance` struct: exactly these seven fields (G realized as its two
+      GAP-73 wire-layout components, nu+entries — together they ARE the single G field, not extra
+      state), plus one user-approved extra field (`closed`, GAP-45, explicitly named in ARCH-011's
+      own text independent of ARCH-011's still-blocked items). Tested (`test/instance.test.js`).
+- [x] SCC comprises six *named* protocols (Init, Confirm, Update, DisputeResolving,
       OfflineResolving, Close) but **Confirm has no contract function** — it is off-chain only
       (DEV-15). Init/Update/DisputeResolving/OfflineResolving/Close execute on Ethereum; nothing
       off-chain sends a transaction for state confirmation itself. (ARCH-001, ARCH-002)
-- [ ] Multiple independent instances can exist simultaneously without being closed/recreated to
+      — No Confirm-shaped entry point exists in the contract's ABI (`test/confirmOffChain.test.js`
+      reviews the deployed ABI directly); Update/Close/Disassociate/OnlineMsg/selectNewLeader are
+      the only entry points, all on Ethereum. Init and the full DisputeResolving/OfflineResolving
+      flows stay unimplemented (Tier C/B), so no entry point for them exists either.
+- [x] Multiple independent instances can exist simultaneously without being closed/recreated to
       cooperate (topology from manual config, no automatic partitioning — ARCH-005, ARCH-007).
-- [ ] `beta` is required per-instance configuration, no protocol default; a round is
+      — `test/instance.test.js` (`HMSC multiple simultaneous instances`): two independently-created
+      instances coexist, neither closed/recreated, no code path partitions or federates them
+      automatically (no Federate entry point exists at all this milestone).
+- [x] `beta` is required per-instance configuration, no protocol default; a round is
       "one signed round state, then up to beta no-signed round states" as a *concept* here — the
       on-chain enforcement of round boundaries is ARCH-008, deferred. (ARCH-009, ARCH-010)
-- [ ] Solidity contract, deployed on a **real** Ethereum-compatible node — not a Go ledger
+      — `hmsc/confirm.RoundConfig`/`NewRoundConfig`: rejects beta=0 (no default), independently
+      configurable per instance. Tested (`round_test.go`). No on-chain round counter/beta
+      enforcement was added to the contract (ARCH-008 stays deferred, per the Do-NOT-implement
+      callout).
+- [x] Solidity contract, deployed on a **real** Ethereum-compatible node — not a Go ledger
       simulator (SRS §26 item 18 is a hard prohibition). The SRS's own experimental target is a
       private 10-node Geth-compatible PoA network (GAP-50, GAP-78) — that is the eventual
       deployment target for the §23 experiments; for day-to-day development/unit testing of the
       contract itself, choosing a standard local Solidity test environment (e.g. Hardhat/Foundry
       running a real EVM against the same bytecode) is engineering tooling, not a protocol
       deviation — note whichever choice is made and why. (SC-001, SC-002, SC-006)
-- [ ] `hmsc/chain`: Go-side Ethereum client binding package. Contract logic itself stays in
+      — Chose Hardhat 2.29 + Solidity 0.8.24 + a real EVM (Hardhat Network) for local
+      development/testing, following the sibling `systems/dht-backed` project's own precedent
+      (Hardhat v2, ethers v6, no toolbox plugin beyond ethers/chai-matchers for assertions).
+      Documented in `package.json`'s description and `hardhat.config.js`'s header comment. The
+      10-node Geth-PoA network stays the eventual §23 experimental deployment target, not built
+      this milestone (no experiment harness exists yet). `contracts/HMSC.sol` compiles clean
+      (`npx hardhat compile`, `viaIR: true` — a standard solc pipeline option needed because the
+      contract's calldata-array-heavy functions overflow legacy codegen's stack, not a
+      behavior/protocol change) and all 26 Hardhat tests pass against the real local EVM.
+- [x] `hmsc/chain`: Go-side Ethereum client binding package. Contract logic itself stays in
       Solidity; this package only calls it. Client library choice is unconstrained (GAP-51, not
       needed) beyond "a Go Ethereum client compatible with the node." (SC-003)
-- [ ] Contract entry points for the Tier-A protocols only, for now: whatever M6/M7 below actually
+      — `hmsc/chain.Client`/`Dial`/`Close`/`Raw`, a thin wrapper around go-ethereum's
+      `ethclient.Client` (already a transitive dependency via `sig`). No HMSC logic reimplemented
+      in Go. Tested against a real EVM: `TestDialConnectsToRealEVM` spawns an actual Hardhat node
+      subprocess, dials it, and confirms `BlockNumber`/`ChainID` (31337) against the real running
+      node — not a mock. `go.mod`/`go.sum` updated (`go mod tidy`) for ethclient/rpc's additional
+      transitive dependencies.
+- [x] Contract entry points for the Tier-A protocols only, for now: whatever M6/M7 below actually
       need. Do not pre-build entry points for blocked protocols. (SC-004, scoped)
+      — `update`, `close`, `disassociate`, `onlineMsg`, `selectNewLeader`, plus the
+      `createInstanceForTesting`/`getInstance` test-harness pair (see M7 below for what each
+      enforces). No `init`/`federate`/`disputeMsg`/`offlineMsg`(challenge-window)/`finalizeOffline`
+      entry point exists — those protocols stay Tier B/C this milestone.
 
 ## M6 — Off-chain state confirmation: leader election & signed/no-signed round flow
 
@@ -354,31 +386,57 @@ step or a recipient's countersignature step** — that's exactly CONFIRM-008/009
 own "Tests runnable now" list, **TEST-18** (the test that would exercise it) is *not* on that list
 either, so there is no concrete Tier-A target for it yet regardless of the ID classification.
 
-- [ ] At most one leader per instance at any time; every participant gets equal opportunity
+- [x] At most one leader per instance at any time; every participant gets equal opportunity
       across rounds. (CONFIRM-001, CONFIRM-002)
-- [ ] **TEST-17**: off-chain-only rotation over `P = {K1 < K2 < K3}` (keys compared as
+      — `hmsc/confirm.NextLeader` returns exactly one key per call (CONFIRM-001 trivially, by
+      signature); `TestEqualOpportunityOverFullCycle` confirms every participant leads exactly once
+      over `|P|` consecutive rounds with no OffList members (CONFIRM-002).
+- [x] **TEST-17**: off-chain-only rotation over `P = {K1 < K2 < K3}` (keys compared as
       fixed-width unsigned big-endian values of the M0 canonical encoding): round 1 leader = min
       key; leader doesn't repeat next round; rotation restarts at the minimum once exhausted →
       `K1, K2, K3, K1` over 4 rounds.
-- [ ] **TEST-17b** (DEV-11): same rotation, but a participant in the *finalized* on-chain OffList
+      — `hmsc/confirm.RotationSequence`/`Eligible`/`NextLeader`; `TestRotationSequenceBasic` (exact
+      `K1,K2,K3,K1` vector) and `TestRotationSequenceOrderIndependent` (P supplied out of order).
+- [x] **TEST-17b** (DEV-11): same rotation, but a participant in the *finalized* on-chain OffList
       is skipped; a merely *pending, unfinalized* OfflineMsg must **not** affect eligibility.
-- [ ] `NET-006` message plumbing only: a participant can send its generated `G_nu` to its current
+      — `TestRotationSequenceFinalizedOffListSkipped` (K2 finalized-offline → `K1,K3,K1`) and
+      `TestRotationSequencePendingOfflineDoesNotExclude` (K2 never passed as finalized → `K1,K2,K3`;
+      the function signature itself has no "pending" parameter for that state to leak through).
+- [x] `NET-006` message plumbing only: a participant can send its generated `G_nu` to its current
       leader (CONFIRM-007 — a plain message send, no signature semantics). This is legitimate
       Tier-A scaffolding *only* if it stays a dumb message send — do not attach any signing logic
       to the leader's receipt of it; that's CONFIRM-008, still blocked. Leave CONFIRM-005 and
       CONFIRM-013 (which describe properties of the *complete* signed-round-state flow) as
       unchecked design notes, not deliverables, until CONFIRM-008/009 unblock — there is no way to
       demonstrate them without the signing step they describe.
-- [ ] No-signed round states are relayed/cached off-chain only and are **never** accepted
+      — `messages.StateToLeader`/`DecodeStateToLeader`, `spec.MsgStateToLeader`: encodes/decodes a
+      bare `GlobalState`, no signature field, no verification on receipt. Tested
+      (`TestStateToLeaderEncodeDecode`, `TestStateToLeaderOverFrame`,
+      `TestDecodeStateToLeaderRejectsShortInput`). CONFIRM-005/013 remain undemonstrated design
+      notes, exactly as scoped — not implemented, not checked off as their own claim.
+- [x] No-signed round states are relayed/cached off-chain only and are **never** accepted
       on-chain (a leader-only-signed submission to Update must be rejected). Scope this to a
       single instance only — general upward relay through a hierarchy (CONFIRM-014's "recursively")
       is GAP-24 OPEN territory. (CONFIRM-018 single-instance slice) — **TEST-29**
-- [ ] Desync recovery: a receiver whose local latest serial ≠ `nu' - 1` requests
+      — `contracts/HMSC.sol`'s `update()`: `require(signers.length >= 2, ...)` rejects a
+      leader-only (one-signature) submission outright — a deliberately narrow TEST-29-only proxy
+      for "not a signed round state", documented in the contract as NOT the blocked UPDATE-006
+      exact-count rule. Tested (`test/update.test.js`, "no-signed-state rejection" describe block,
+      both the rejection and the "more than one signature accepted" cases).
+- [x] Desync recovery: a receiver whose local latest serial ≠ `nu' - 1` requests
       `(fromSerial, toSerial)` from its **direct** leader only (no recursion to higher leaders),
       verifies returned signatures and serial continuity before adopting. (CONFIRM-016,
       CONFIRM-017) — **TEST-21**
-- [ ] Manual dispute-trigger entry point: any participant can invoke it explicitly; no automatic
+      — `hmsc/confirm.NeedsSync`/`VerifySyncResponse`: no parent-leader concept anywhere in the
+      type (structurally no recursion possible). Tested: gap detection at various offsets, valid
+      continuous-range acceptance, serial-gap rejection, bad-signature rejection, incomplete-range
+      rejection (`sync_test.go`).
+- [x] Manual dispute-trigger entry point: any participant can invoke it explicitly; no automatic
       detection thresholds (GAP-40). (CONFIRM-020)
+      — `hmsc/dispute.TriggerDispute`/`NewTriggerDispute`: callable with any participant's key, no
+      leader-only restriction; no periodic/background trigger exists anywhere in the package (code
+      review — the only producer of a `TriggerDispute` value is the explicit constructor). Tested
+      (`TestTriggerDisputeAnyParticipant`).
 
 ## M7 — State update rules (partial), dispute/offline/online/close basics
 
@@ -391,47 +449,109 @@ GAP-88 residual, except the two Tier-A pieces below), OFFLINE-001..004/007..009/
 offline-detection/challenge-window mechanics — GAP-85 residual). Build exactly the Tier-A slices
 listed per test below; each is deliberately narrower than its protocol section.
 
-- [ ] **TEST-23** Rule 1: reject an Update submission with `nu <= nu*` (`nu*` = latest signed
+- [x] **TEST-23** Rule 1: reject an Update submission with `nu <= nu*` (`nu*` = latest signed
       state stored on-chain in the root instance, GAP-66). (UPDATE-004)
-- [ ] **TEST-24** / **TEST-36** Rule 2: reject an Update that changes the LocalState entry of a
+      — `HMSC.sol`'s `update()`: `require(nu > inst.nu, ...)`. Hierarchy/federation stays out of
+      scope this milestone, so every instance here is treated as its own root — `nu*` resolves to
+      this instance's own currently stored `nu` (documented in the function's doc comment).
+      Tested: `test/update.test.js` (`nu == nu*` and `nu < nu*` both rejected; `nu > nu*` accepted).
+- [x] **TEST-24** / **TEST-36** Rule 2: reject an Update that changes the LocalState entry of a
       participant currently in OffList (frozen entry). (UPDATE-005, OFFLINE-010)
-- [ ] **TEST-26** Rule 3 (validity slice only): reject an Update if any included signature fails
+      — `update()`: for each OffList address, looks up its frozen position in `P` and requires the
+      submitted entry at that position to be unchanged. Tested: entry-changed rejected,
+      entry-unchanged (with a different member's entry changed) accepted.
+- [x] **TEST-26** Rule 3 (validity slice only): reject an Update if any included signature fails
       `Vrfy`. Do not yet build the exact-signer-count / leader-presence sub-checks (UPDATE-006,
       UPDATE-008 — blocked). (UPDATE-007)
-- [ ] **TEST-29** reject a state on Update that carries only the leader's signature (a no-signed
+      — `update()`'s `_verifySigners`: `ecrecover` per signature, checked against the claimed
+      signer and P membership; no signer-count or leader-presence check anywhere. Tested: one
+      corrupted signature rejected; a signature from a non-P-member rejected.
+- [x] **TEST-29** reject a state on Update that carries only the leader's signature (a no-signed
       state). (UPDATE-001, CONFIRM-018 — cross-reference with M6)
-- [ ] **TEST-30** `Alg4.CheckpointSelection`, no-children case only (`ChildList == null`):
+      — see M6 above (same `update()` check); cross-referenced here per the tracker's own note.
+- [x] **TEST-30** `Alg4.CheckpointSelection`, no-children case only (`ChildList == null`):
       implement the **prose semantics** (DEV-02), not the literal off-by-one listing — checkpoint
       = the instance's latest signed round state. (DISPUTE-005, DISPUTE-009)
-- [ ] **TEST-47** new-leader selection: `index = uint(blockhash(block.number - 1)) mod
+      — `hmsc/dispute.CheckpointSelection`: returns the maximum serial in the retained signed-state
+      history. Tested with two illustrative vectors (contiguous and non-contiguous/unordered
+      input) — the paper's own Fig. 9 diagram content isn't available as extractable text, so exact
+      G_4/G_3 figure reproduction wasn't possible; the vectors instead directly test the stated
+      prose rule ("the checkpoint is Γx's latest signed round state").
+- [x] **TEST-47** new-leader selection: `index = uint(blockhash(block.number - 1)) mod
       eligible-candidate-count`; candidates exclude the removed participant and finalized
       OffList members (pending, unfinalized OfflineMsgs do not exclude). (DISPUTE-012)
-- [ ] **TEST-48** OfflineMsg signer-set check in isolation: exactly `n-1` valid signatures
+      — `HMSC.sol`'s `selectNewLeader(address[] candidates)`: the isolated block-hash-mod-count
+      pick only; candidate-list filtering is `hmsc/confirm.Eligible` (Go-side, shared with
+      TEST-17/17b). Tested against a real Hardhat EVM block (`test/selectNewLeader.test.js`),
+      including a no-candidates revert case.
+- [x] **TEST-48** OfflineMsg signer-set check in isolation: exactly `n-1` valid signatures
       (excluding `pi`) accepted, `n-2` rejected; `H(psi)` computed over `pi`'s **active**
       LogCacheQueue including a partial batch (DEV-03, DEV-17). (OFFLINE-005, OFFLINE-006)
-- [ ] **TEST-37** online transition: `OnlineMsg` accepted **without** requiring `S_pi`;
+      — `hmsc/offline.CheckOfflineMsgSigners`/`HashActiveQueue`. Tested: exactly n-1 (excluding pi)
+      accepted, n-2 rejected, a duplicate signer rejected, a bad signature rejected;
+      `HashActiveQueue` shown deterministic, order-sensitive, and not truncating a partial batch.
+      Deliberately isolated from the still-blocked challenge-window mechanics (GAP-85) — no
+      startBlock/cancel/FinalizeOffline code exists.
+- [x] **TEST-37** online transition: `OnlineMsg` accepted **without** requiring `S_pi`;
       acceptance removes `pi` from OffList; `pi`'s GlobalState and current-batch LogCacheQueue
       are synced from its **direct leader only** (not "other servers in the domain" — DEV-12);
       `pi`'s next batch chains from its frozen LocalState; `pi`'s log reader stays paused for the
       whole time it was offline (EXPERIMENT-ONLY, GAP-69/LIM-01), so no backlog-ingestion logic
       is needed or wanted. (OFFLINE-011..015)
-- [ ] **TEST-38** Close: a signed `(G_nu | Close)` via `CloseMsg` is accepted only with purpose
+      — On-chain half: `HMSC.sol`'s `onlineMsg()` — accepted without `S_pi`, removes `pi` from
+      OffList (`test/online.test.js`). Off-chain half: `hmsc/offline.RejoinSyncRequest/Response`/
+      `VerifyRejoinSync` — syncs GlobalState (serial continuity + leader signature) and
+      LogCacheQueue data from the direct leader only, no parent-leader concept in the type (same
+      shape as M6's desync recovery). Tested (`offline_test.go`). No backlog-ingestion logic was
+      added (nothing to add — EXPERIMENT-ONLY/GAP-69/LIM-01 licenses skipping it entirely).
+- [x] **TEST-38** Close: a signed `(G_nu | Close)` via `CloseMsg` is accepted only with purpose
       `CLOSE` signatures from **every** member of the instance's P, offline members included — a
       single missing offline signer blocks the whole Close (LIM-03, intentional). Subsequent
       Update on a closed instance is rejected; closed data stays readable (no cleanup).
       (CLOSE-001..005)
-- [ ] **TEST-44** Close rejected outright while the instance has a non-null Parent (disassociate
+      — `HMSC.sol`'s `close()`: requires `signers.length == P.length` and every P member covered by
+      a valid purpose-CLOSE signature (a missing signer, or a signature under purpose STATE,
+      rejected). `update()` rejects on a closed instance. `getInstance` still reads a closed
+      instance's data back correctly. Tested (`test/close.test.js`, plus the "on a closed
+      instance" describe block in `test/update.test.js`).
+      — Note (self-review, 2026-09-18): `close()` never inspects `ChildList` at all — whether a
+      CloseMsg may close an instance whose ChildList is non-null is still OPEN (GAP-89, "User
+      decision required: YES") and no TEST-38/44 vector exercises that case. Flagged explicitly in
+      the contract's doc comment so the omission reads as genuinely undecided, not as a silent
+      resolution either way.
+- [x] **TEST-44** Close rejected outright while the instance has a non-null Parent (disassociate
       first). (CLOSE-004, CLOSE-009)
-- [ ] **TEST-39** / **TEST-40** Disassociation: parent `Γa` with children `Γ1, Γ2` closes once
+      — `close()`: `require(inst.parent == bytes32(0), ...)`. Tested (`test/close.test.js`, "HMSC
+      close with a parent").
+- [x] **TEST-39** / **TEST-40** Disassociation: parent `Γa` with children `Γ1, Γ2` closes once
       both child leaders submit signed close states (purpose CLOSE); each direct child's Parent
       resets to null, children stay open; `DisassociateMsg` rejected while `Γa.Parent != null`
       (LIM-04, no nested disassociation); a corrupted child signature leaves `Γa` open.
       (CLOSE-006, CLOSE-007)
-- [ ] Audit-closure coupling: stopping the log reader/LSG is coupled with invoking Close; no
+      — `HMSC.sol`'s `disassociate()`: one purpose-CLOSE signature per direct child, verified
+      against a member of that child's own stored P (determining that signer is specifically that
+      child's *leader* is out of scope, same GAP-60/82 simplification used elsewhere this
+      milestone — documented in the function's doc comment); every direct child must be covered;
+      each covered child's Parent reset to null; the parent's own Parent must already be null
+      (LIM-04). Tested (`test/disassociate.test.js`): both children sign → parent closes, children
+      stay open with Parent reset; nested-disassociation rejected; one corrupted child signature
+      leaves the parent open.
+- [x] Audit-closure coupling: stopping the log reader/LSG is coupled with invoking Close; no
       separate module teardown exists. (CLOSE-008)
-- [ ] **TEST-45** every accepted Update emits exactly one event carrying the full signed state;
+      — `hmsc/closure.CloseInstance`: stops the reader first, unconditionally, then runs the
+      caller's own Close invocation; no separate teardown step exists even if that invocation
+      fails. Tested against a real `lsg.LogReader` (not just a mock), confirming no further records
+      are consumed after closure (`closure_test.go`).
+- [x] **TEST-45** every accepted Update emits exactly one event carrying the full signed state;
       the contract keeps **no** on-chain history array (SC-007 scope: event emission only, not
       the auditor's cross-check consumer — that's still AUDIT-012, blocked).
+      — `HMSC.sol`'s `UpdateAccepted` event (sid, nu, entries, signers, v, r, s), emitted exactly
+      once per accepted `update()` call; `getInstance` only ever exposes the latest (nu, entries) —
+      no history array. Tested: 3 accepted Updates → exactly 3 events, correct nu per event
+      (`test/update.test.js`). This checks off only the narrow TEST-45 slice of UPDATE-011 (itself
+      Tier C/blocked in full, GAP-81) — the full "if all four State Update Rules hold" precondition
+      is not built (Rule 3 count/Rule 4 stay unimplemented), consistent with this milestone's own
+      narrower `update()` acceptance condition.
 
 ## M8 — Faithfulness review (run continuously; formal pass before declaring a milestone done)
 
@@ -448,6 +568,32 @@ listed per test below; each is deliberately narrower than its protocol section.
       no REST/gRPC/queues as DELIA wire messages (JSON is used only for the local `internal/config`
       deployment file, documented as tooling not a DELIA requirement), no Go-simulated ledger (none
       built yet). Re-run this walk after every later milestone before checking the box.
+      — 2026-09-18 re-run against the M5/M6/M7 diff (`contracts/HMSC.sol`, `hmsc/confirm`,
+      `hmsc/dispute`, `hmsc/offline`, `hmsc/chain`, `hmsc/closure`, `internal/spec` RoleSigner
+      addition, `messages.StateToLeader`, `test/*.js`, `package.json`/`hardhat.config.js`): no
+      caching beyond what's licensed; no alternative Merkle/election/consensus (leader rotation is
+      exactly the paper's min-key rule, `selectNewLeader` uses randomness only for NewLeader
+      selection per item 10's own carve-out); no signature aggregation/BLS/Schnorr/Ed25519 (plain
+      secp256k1 ECDSA + `ecrecover`, one signature verified at a time); no on-chain Close challenge
+      period (`close()` takes effect in one transaction); no cleanup/pruning after Close (closed
+      data stays readable, tested); no extra cryptographic fields beyond the already-frozen
+      purpose/role bytes (the new `RoleSigner` constant is a labelled IMPL addition, GAP-86,
+      exactly like the pattern item 17 permits); the Solidity contract is the real, only HMSC
+      logic — `hmsc/chain` is a thin RPC wrapper that reimplements nothing, and the Hardhat local
+      EVM used for its own tests is a real EVM executing the real compiled bytecode, not a
+      Go-simulated ledger (item 18); no REST/gRPC/queues added as DELIA wire messages (`package.json`
+      is npm tooling config, not a DELIA message format); no goroutines inside `HMSC.sol`,
+      `hmsc/confirm`, `hmsc/dispute`, `hmsc/offline`, or the Solidity contract itself (the only new
+      goroutines are test-harness orchestration in `hmsc/chain/chain_test.go` and
+      `hmsc/closure/closure_test.go`, not inside any algorithm/protocol step). No new scope-creep
+      issue found. Two small, documented implementation calls made this pass (both reversible, both
+      noted where they're made): (a) `RoleSigner`, one generic signer-role constant for
+      Update/Close/Disassociate signatures that doesn't distinguish leader from participant; (b) a
+      resync/rejoin state entry's signature is verified under the already-frozen
+      PurposeSTATE/RoleSigner pair rather than inventing a new purpose, since the SRS doesn't pin
+      one down for that specific relay. `close()`'s silence on GAP-89's ChildList question is
+      flagged in its own doc comment (see the M7 TEST-38 note above) rather than resolved either
+      way.
 
 ---
 
@@ -498,12 +644,36 @@ implementation instead — same algorithm, no protocol effect, but anyone (inclu
 agent) re-running these commands on this machine needs the same env var or will hit the same
 build failure. Worth fixing at the toolchain level eventually, but out of scope for this tracker.
 
+**M5-M7 pass (2026-09-18):** no new OPEN protocol gap was hit; every choice made was either
+already licensed by a DECIDED gap or a small, documented, reversible implementation call within
+this tracker's own ambiguity-handling rule (recorded at the specific bullet where each was made:
+M5's Hardhat/Solidity-version tooling choice, M6/M7's `RoleSigner` constant, the resync-entry
+signature purpose choice, disassociate's "child leader" → "any member of the child's P"
+simplification, TEST-29's narrow `>=2`-signature proxy, and `close()`'s deliberate silence on
+GAP-89's ChildList question). Two loose ends resolved:
+- The stray uncommitted `internal/spec/spec.go` diff the 2026-09-17 tester pass filed
+  (`RoleLeader`/`RoleParticipant`, citing the now-corrected-to-Tier-B CONFIRM-008/009) was reverted
+  outright (`git checkout -- internal/spec/spec.go`) before any other work this session — see the
+  M0 tracker item above, now marked resolved.
+- `go.mod`/`go.sum` gained additional transitive dependencies (`go mod tidy`) once `hmsc/chain`
+  started importing go-ethereum's `ethclient`/`rpc` packages (previously only `go-ethereum/crypto`,
+  via `sig`, was used) — same `CGO_ENABLED=0` pure-Go path applies; no new toolchain issue.
+
+**Node/npm tooling note (M5, not a protocol gap):** `package.json`/`hardhat.config.js`/`test/*.js`
+are development/testing tooling for `contracts/HMSC.sol` only (SC-001/002/006's own documented
+carve-out — see the M5 Verification log entry below), not a DELIA off-chain component; GO-001's
+"no off-chain Java/JS component" is about DELIA's actual algorithms/protocols (which stay in Go),
+not this contract's local test harness, matching the sibling `systems/dht-backed` project's own
+precedent for the same distinction.
+
 ## Verification log
 
 All commands below were run with `CGO_ENABLED=0` (see the environment note above) from
 `systems/delia`. `go build ./...`, `go vet ./...` and `go test ./...` are clean across the whole
 module as of 2026-09-17 (13 test packages, 0 failures; 117 `--- PASS` cases after the tester
-verification pass below added its own files).
+verification pass below added its own files). As of 2026-09-18 (after the M5-M7 pass below): 18 Go
+test packages, 0 failures, 153 `--- PASS` cases (`go test ./... -v | grep -c '^--- PASS'`); plus
+`npx hardhat test` clean, 26 passing, against `contracts/HMSC.sol` on a real local EVM.
 
 - 2026-09-17, M0 box 1 (module/package skeleton): `go build ./...`, `go vet ./...` clean.
 - 2026-09-17, M0 box 2 (process model): `go test ./internal/nettransport/...` —
@@ -519,6 +689,30 @@ verification pass below added its own files).
 - 2026-09-17, M4 (Algorithm 3 / audit, all 6 boxes): `go test ./auditor/...` (incl.
   `TestLogVerifyInstrumentation` for TEST-14's call-count requirement and
   `TestSchedulerNoOverlap`/`TestSchedulerRunsPeriodically` for AUDIT-002).
+
+### M5-M7 pass (2026-09-18)
+
+- M5 box 1 (Gamma struct), box 2 (Confirm has no contract function), box 3 (multiple instances):
+  `npx hardhat test test/instance.test.js test/confirmOffChain.test.js` — all passing.
+- M5 box 4 (beta per-instance config): `go test ./hmsc/confirm/... -run RoundConfig` (also covered
+  by the full-package run below).
+- M5 box 5 (Hardhat/Solidity tooling choice): `npx hardhat compile` clean (`viaIR: true`,
+  Solidity 0.8.24); documented in `package.json`/`hardhat.config.js`.
+- M5 box 6 (`hmsc/chain`): `go test ./hmsc/chain/...` — `TestDialRejectsMalformedURL`,
+  `TestDialConnectsToRealEVM` (spawns a real Hardhat node subprocess, confirms `BlockNumber`/
+  `ChainID` against it).
+- M5 box 7 (contract entry points, Tier-A only): `npx hardhat test` (full suite, 26 passing) +
+  code review of `contracts/HMSC.sol`'s function list (no Init/Federate/DisputeMsg/OfflineMsg
+  challenge-window entry point exists).
+- M6 (all 7 boxes): `go test ./hmsc/confirm/... ./hmsc/dispute/...` (`TriggerDispute` covers the
+  manual-trigger box) plus `npx hardhat test test/update.test.js` (TEST-29 half) and
+  `go test ./messages/...` (NET-006 `StateToLeader`).
+- M7 (all 13 boxes): `npx hardhat test` (`test/update.test.js`, `test/close.test.js`,
+  `test/disassociate.test.js`, `test/online.test.js`, `test/selectNewLeader.test.js` — 26 passing
+  total) plus `go test ./hmsc/dispute/... ./hmsc/offline/... ./hmsc/closure/...`.
+- Full module: `go build ./...`, `go vet ./...`, `go test ./...` clean (18 test packages, 153
+  `--- PASS` cases); `npx hardhat compile` and `npx hardhat test` clean (26 passing) from
+  `systems/delia`, `CGO_ENABLED=0` throughout for the Go commands.
 
 ### Tester verification pass (2026-09-17)
 
