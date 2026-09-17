@@ -9,6 +9,11 @@ section (near the end of the file) and the **"Tests runnable now"** list in §22
 Verification log below); M5-M8 are not started. See the end-of-run handoff in the session history
 for a full summary.
 
+**Tester sign-off (2026-09-17):** an independent tester agent re-verified every `- [x]` box in
+M0-M4 by writing and running its own tests (not just reading the developer's tests/notes) — see
+"Tester verification pass" in the Verification log below. All checked boxes held; nothing was
+unchecked; no scope creep into M5-M8/blocked territory was found. M0-M4 are DONE.
+
 **Read before working:** `DELIA_REQUIREMENTS.md` §1 (scope), §2 (source-of-truth rules, esp. 2.3
 "no unstated optimization" and 2.5 documented deviations DEV-01..20), §2.7 (documented limitations
 LIM-01..05), §21 (Go package layout), §26 (explicit prohibitions), and the **"Developer Handoff
@@ -126,6 +131,26 @@ DATA-018 (encoding half), CRYPTO-007 (encoding half), NET-033 (framing half)
       codes, GAP-73 GlobalState layout (implemented in `globalstate.Encode/Decode`), signed-bytes
       layout helper, record hash rule (`logcache.RecordHash`), frame codec. Authority note is the
       package doc comment. Cross-package normative vector test included.
+
+- [ ] **Tester-filed (2026-09-17), scope-creep check on the M0 box above:** at verification time,
+      `internal/spec/spec.go` had an *uncommitted* working-tree change (not part of any commit on
+      this branch) adding `SignerRole` constants `RoleLeader = 0x01` / `RoleParticipant = 0x02`,
+      with a doc comment explicitly citing CONFIRM-008/CONFIRM-009 and labelling them "M6 Tier-A
+      scope". CONFIRM-008 and CONFIRM-009 are on M6's own "Do NOT implement yet" list
+      (blocked by GAP-81/GAP-82/GAP-24 OPEN) and M6 has not been started (all its boxes are still
+      `- [ ]`). Neither constant is referenced anywhere else in the tree (`grep -rn
+      "RoleLeader\|RoleParticipant"` returns only the two declarations) — no M0-M4 logic depends on
+      them, so no M0-M4 checked box's actual claim is affected and none was unchecked over this.
+      But the constants themselves reach past the box's own documented scope ("freeze only the
+      roles a Tier-A item actually needs" — no Tier-A/M0-M4 item needs these two) and into M6's
+      explicitly-blocked IDs. Action needed: either remove the two constants until M6 actually
+      starts, or, if the developer wants to keep them as inert scaffolding, get that logged as a
+      documented, reversible call (per the developer agent's own ambiguity-handling rule) rather
+      than left as a silent uncommitted diff — and either way this should be committed or reverted,
+      not left dangling uncommitted. Not a failure of the M0 box above (its own documented content
+      — purpose codes, message types, GlobalState layout, signed-bytes helper, record hash rule,
+      frame codec — is all present, tested, and unaffected); filed as a separate item because it is
+      additional content the box never claimed.
 
 ## M1 — Cryptographic primitives & signing
 
@@ -467,7 +492,8 @@ build failure. Worth fixing at the toolchain level eventually, but out of scope 
 
 All commands below were run with `CGO_ENABLED=0` (see the environment note above) from
 `systems/delia`. `go build ./...`, `go vet ./...` and `go test ./...` are clean across the whole
-module as of 2026-09-17 (13 test packages, 0 failures).
+module as of 2026-09-17 (13 test packages, 0 failures; 117 `--- PASS` cases after the tester
+verification pass below added its own files).
 
 - 2026-09-17, M0 box 1 (module/package skeleton): `go build ./...`, `go vet ./...` clean.
 - 2026-09-17, M0 box 2 (process model): `go test ./internal/nettransport/...` —
@@ -483,3 +509,64 @@ module as of 2026-09-17 (13 test packages, 0 failures).
 - 2026-09-17, M4 (Algorithm 3 / audit, all 6 boxes): `go test ./auditor/...` (incl.
   `TestLogVerifyInstrumentation` for TEST-14's call-count requirement and
   `TestSchedulerNoOverlap`/`TestSchedulerRunsPeriodically` for AUDIT-002).
+
+### Tester verification pass (2026-09-17)
+
+An independent tester agent re-verified every `- [x]` box in M0-M4 by writing and running its own
+tests against the actual claims (new `*/tester_verify_test.go` files added alongside the
+developer's own tests, none of them modified; nothing in `internal/*`, `hash`, `sig`, `logcache`,
+`merkle`, `localstate`, `globalstate`, `lsg`, `auditor` implementation code was touched). All
+commands run with `CGO_ENABLED=0`. `go build ./...`, `go vet ./...` clean; `go test ./...` clean,
+117 `--- PASS` cases total (developer's tests + tester's).
+
+New tests added, by package, and what each specifically targets beyond the developer's own
+coverage:
+
+- `merkle/tester_verify_test.go`: theta=2 (no duplication), theta=5 and theta=6 (multi-level odd
+  duplication), leaf-order sensitivity (swap changes root), single-leaf identity — all
+  cross-checked against `crypto/sha256` directly rather than going through `hash.H`, so a shared
+  bug between `hash.H` and `MHTGen`'s use of it can't hide.
+- `localstate/tester_verify_test.go`: li=0 and li>0 branches cross-checked byte-for-byte against
+  raw `crypto/sha256.Sum256`, including an explicit check that li=0 does NOT equal
+  `H(root||zero-digest)`, and an independently-reconstructed 4-batch chain.
+- `globalstate/tester_verify_test.go`: `Decode` rejects a short header, a truncated buffer, and a
+  buffer with trailing garbage; n=0 domain round-trips; `Equal` catches a single flipped bit deep
+  inside an entry; a 4-generation chain (G_0..G_3) verifies serial increment and the
+  untouched-other-positions invariant at every step; `StateVerify` called back-to-back with two
+  different honest inputs then a tampered variant proves no cross-call caching/staleness; an
+  independent GlobalGen call-count spy proves a root mismatch skips GlobalGen entirely (not just
+  discards its result) while a valid root still invokes it exactly once (rules out a broken spy
+  producing a false pass); an independent li=0 case with a different index/psi shape than
+  TEST-05b.
+- `auditor/tester_verify_test.go`: GAP-75 skip re-tested with NON-empty leftover records supplied
+  for the never-completed server (rules out the developer's own test only passing because it used
+  nil records); a mixed 2-server history (server A completes batches while B is still the zero
+  sentinel, then B completes its own batches with a tamper) verifying ErrList reports B's own li
+  numbering, not a global k-index or A's batch numbers; an independent single-linear-pass MHTGen
+  call-count check across 6 states; a no-cascade check (a tampered early batch must not also flag
+  later, honest batches).
+- `sig/tester_verify_test.go`: recovers the actual signing key from a signature via
+  go-ethereum's own `Ecrecover`/`SigToPub` path and cross-checks it against `KeyPair.PublicKey`,
+  confirming this is real secp256k1 ECDSA and not a stub; a one-bit flip at every byte/bit position
+  of the 64-byte signature (not just byte 0) is rejected; a one-bit flip in the signed digest is
+  rejected.
+- `internal/pki/tester_verify_test.go`: a client presenting NO certificate at all (not just a
+  wrong-CA certificate, which the developer's own test already covers) is rejected by a real TLS
+  handshake.
+- `lsg/tester_verify_test.go`: three independently-corrupted proposals in a row are each rejected,
+  produce exactly one failure notification apiece, and do not prevent a subsequent genuinely honest
+  proposal for the same nu from being accepted (no permanent lockup, no stale-failure bleed-through);
+  `Receive` is shown to recompute `StateVerify` fresh per call by accepting a valid nu=1 proposal
+  and then correctly rejecting a mismatched nu=2 proposal from the same proposer right afterward.
+
+Also checked (no new test file, verified by direct execution/inspection): CLI smoke run of
+`go run ./cmd/provision -out ... -theta 5 -participants p1=...,p2=...` produced a real CA, per-participant
+keys/certs, and a `domain.json` with the correct P order and public keys; `import` review of every
+`.go` file in `lsg` confirms no `contracts`/chain/ledger import anywhere (LSG-001's "no ledger
+interaction" claim); repo-wide search for `ethclient`/`abigen`/`bind.`/`core/types` found no hits
+(no premature HMSC/chain wiring); `contracts/` directory and any `hmsc*` package are absent (no
+M5-M8 scope creep).
+
+No M0-M4 box was unchecked. No new protocol gap or scope-creep issue was found; the LSG-002/003/005
+stage-1 broadcast wire format remains correctly unimplemented (GAP-05 still OPEN), and no HMSC/chain
+code exists yet.
