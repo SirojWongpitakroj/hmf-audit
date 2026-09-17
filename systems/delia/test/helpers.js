@@ -66,6 +66,17 @@ function collectSignatures(wallets, purpose, nu, entries) {
   };
 }
 
+// randomWallets creates n standalone local ethers.Wallet instances to stand
+// in for DELIA participants (CRYPTO-008/009: one secp256k1 key per
+// participant, generated at provisioning, no runtime PKI — these tests
+// generate them locally rather than reusing Hardhat's funded JSON-RPC
+// signer accounts, which do not expose a private key for local digest
+// signing). They need no ETH: SigningKey.sign is a pure local operation:
+// the funded default Hardhat signer sends the actual transactions.
+function randomWallets(n) {
+  return Array.from({ length: n }, () => ethers.Wallet.createRandom());
+}
+
 function randomEntries(n) {
   const out = [];
   for (let i = 0; i < n; i++) {
@@ -81,5 +92,6 @@ module.exports = {
   digestFor,
   signState,
   collectSignatures,
+  randomWallets,
   randomEntries,
 };
