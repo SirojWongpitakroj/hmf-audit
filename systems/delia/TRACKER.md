@@ -20,6 +20,16 @@ unresolved conflicts. **Tier A below is the carve-out the SRS authors explicitly
 implementable now** ("Open gap? = N" in the §24 traceability matrix). Do not treat the DRAFT
 status as blocking Tier A work; do not treat Tier A's existence as clearing anything outside it.
 
+**Local environment note (2026-09-17):** this machine's `gcc` (MinGW 6.3.0) cannot compile 64-bit
+cgo output (`cc1.exe: sorry, unimplemented: 64-bit mode not compiled in`), so a plain
+`go build ./...` / `go vet ./...` / `go test ./...` fails as soon as any dependency pulls in a
+cgo path (observed via `go-ethereum`'s transitive deps once `internal/pki`/`sig` were added).
+**Always run Go commands in this repo with `CGO_ENABLED=0`** — the dependency graph already has a
+pure-Go path for everything used so far (confirmed: `CGO_ENABLED=0 go build/vet/test ./...` all
+pass clean). This is a local toolchain limitation, not a DELIA requirement — do not "fix" it by
+adding cgo-avoidance workarounds beyond just setting the env var, and do not read a bare
+`go build` failure as a code regression without first retrying with `CGO_ENABLED=0`.
+
 ## Binding rules for whoever works this tracker
 
 1. **No unstated optimization** (SRS §2.3, §26). No caching beyond what Eq. (2)/Alg. 1-3
