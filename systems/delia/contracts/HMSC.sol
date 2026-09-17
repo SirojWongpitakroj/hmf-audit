@@ -305,6 +305,14 @@ contract HMSC {
     // missing offline signer blocks the whole Close), rejected outright
     // while Parent != null (CLOSE-004/009, TEST-44; disassociate first).
     // Rules 1/2/4 are not stated to apply to Close and are not applied here.
+    //
+    // Deliberately NOT decided here (GAP-89, still OPEN, "User decision
+    // required: YES"): whether CloseMsg may close an instance whose
+    // ChildList is non-null. This function does not inspect ChildList at
+    // all — it neither allows this on purpose nor rejects it on purpose.
+    // No TEST-38/44 vector exercises a non-null-ChildList instance; do not
+    // read this function's silence on that point as a resolution of GAP-89
+    // in either direction.
     function close(
         bytes32 sid,
         uint64 nu,
