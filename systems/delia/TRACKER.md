@@ -9,12 +9,21 @@ section (near the end of the file) and the **"Tests runnable now"** list in §22
 bullets are now also implemented and tested (see the checkboxes and Verification log below). M8's
 TEST-42 faithfulness review is a continuous item re-run after this pass too (see its note); it
 stays unchecked by design (it covers the whole project, not one milestone). See the end-of-run
-handoff in the session history for a full summary of this pass.
+handoff in the session history for a full summary of this pass. **M5-M7 are DONE** (see the
+2026-09-18 tester sign-off directly below).
 
 **Tester sign-off (2026-09-17):** an independent tester agent re-verified every `- [x]` box in
 M0-M4 by writing and running its own tests (not just reading the developer's tests/notes) — see
 "Tester verification pass" in the Verification log below. All checked boxes held; nothing was
 unchecked; no scope creep into M5-M8/blocked territory was found. M0-M4 are DONE.
+
+**Tester sign-off (2026-09-18):** an independent tester agent re-verified every `- [x]` box in
+M5, M6 and M7 by writing and running its own tests against the actual claims (not just reading the
+developer's own tests/notes) — see "Tester verification pass (2026-09-18)" in the Verification log
+below. All checked boxes held; nothing was unchecked; the CONFIRM-008/009 Tier-B correction was
+confirmed respected (no `RoleLeader`/`RoleParticipant` anywhere in the tree, only the generic
+`RoleSigner`); the `hmsc/chain` real-EVM test was confirmed to leave no orphaned `node.exe`/hardhat
+process behind. M5-M7 are DONE.
 
 **Read before working:** `DELIA_REQUIREMENTS.md` §1 (scope), §2 (source-of-truth rules, esp. 2.3
 "no unstated optimization" and 2.5 documented deviations DEV-01..20), §2.7 (documented limitations
@@ -796,3 +805,120 @@ demonstrated until CONFIRM-008/009 unblock. The stray `RoleLeader`/`RoleParticip
 as reversible pre-staging, per the tester's own recommendation) rather than being touched here —
 this session edits the tracker, not implementation code, per the same separation of concerns the
 tester and developer agents observe.
+
+### Tester verification pass (2026-09-18)
+
+An independent tester agent re-verified every `- [x]` box in M5, M6 and M7 by writing and running
+its own tests against the actual claims (new `hmsc/confirm/tester_verify_test.go`,
+`hmsc/dispute/tester_verify_test.go`, `hmsc/offline/tester_verify_test.go` and
+`test/tester_verify.test.js` added alongside the developer's own tests, none of them modified;
+nothing in `contracts/HMSC.sol`, `hmsc/*`, `internal/spec`, `messages` implementation code was
+touched). All Go commands run with `CGO_ENABLED=0`. `go build ./...`, `go vet ./...` clean;
+`go test ./...` clean, 168 `--- PASS` cases total (developer's 153 + tester's 15 new Go cases);
+`npx hardhat test` clean, 40 passing (developer's 26 + tester's 14 new JS cases).
+
+What each new file specifically targets, beyond the developer's own coverage:
+
+- `hmsc/confirm/tester_verify_test.go`: TEST-17's exact rotation vector re-derived against REAL
+  secp256k1 public keys (33-byte compressed encoding via `sig.Gen`), not just the developer's
+  single-byte stand-in keys, to actually exercise the "fixed-width unsigned big-endian comparison
+  of the M0 canonical encoding" claim on realistic multi-byte inputs; TEST-17b's finalized-vs-
+  pending distinction re-checked directly against `Eligible` (not just `RotationSequence`) with
+  real keys; multiple-simultaneously-offline rotation; `NextLeader` wrap-at-maximum in isolation; a
+  structural (reflection-based) check that `SyncRequest` has exactly two fields (`FromSerial`,
+  `ToSerial`) and nothing that could encode a parent-leader/hop-count, i.e. CONFIRM-016/017's
+  "no recursion to a higher leader" claim is checked as a type-shape fact, not just an assertion;
+  an end-to-end desync-recovery exercise (`NeedsSync` -> sign real states with a real leader key ->
+  `VerifySyncResponse`) in one test, not just each half in isolation.
+- `hmsc/dispute/tester_verify_test.go`: a targeted check that `CheckpointSelection` returns the
+  landmark maximum serial itself (9, from history `{9,5,1}`) and NOT `nu-1`, which is what Alg. 4's
+  literal decrement-before-test listing (INC-07) would produce if it had leaked back in despite
+  DEV-02's prose-semantics ruling; single-entry, duplicate-entry and single-zero-entry (distinct
+  from the empty/not-found case) boundary vectors; a structural check that `TriggerDispute` has no
+  role-restriction field, and that a zero checkpoint round-trips (the constructor itself applies no
+  validation, matching "any participant, no automatic detection threshold" literally).
+- `hmsc/offline/tester_verify_test.go`: the n-1/n-2 boundary re-checked at n=6 (the developer's own
+  vectors used n=4) with both sides of the boundary asserted in the same test; an n=1
+  single-participant domain (expected signer set is empty, accepted correctly as a natural
+  consequence of the n-1 formula, not a separately-built special case); a signer list padded with
+  an extra duplicate, otherwise-complete entry, confirmed rejected on count rather than silently
+  accepted by ignoring the duplicate.
+- `test/tester_verify.test.js` (Hardhat, against the real compiled `contracts/HMSC.sol` bytecode on
+  Hardhat's local EVM, 14 new passing cases): Rule 1's `nu == nu*` boundary re-checked with a fresh
+  `nu*` value; Rule 2 re-checked with 4 participants and 2 simultaneously-offline members, changing
+  entries elsewhere in the same submission that also (separately) tries to touch a frozen entry;
+  Rule 3's validity check re-checked with a `v`-flip (distinct from the developer's own r/s-flip
+  vector) — and, the specific concern this pass was asked to probe hardest: **two direct tests that
+  a "wrong" signer count is NOT rejected in either direction** (2-of-4 signing when a naive
+  num-numoff rule would expect 3; all 4-of-4 signing, including the finalized-offline member, when
+  a naive rule would expect fewer) — both accepted, confirming UPDATE-006 truly is not
+  accidentally implemented; `selectNewLeader` cross-checked against `eth_getBlockByNumber` fetched
+  via the raw JSON-RPC call directly (not ethers' `getBlock` convenience wrapper the developer's own
+  test used) across 4 distinct freshly-mined blocks, with a sanity check that picks are not all
+  identical (rules out a stubbed/constant value) and a same-block determinism check; `close()`
+  re-checked with 4 participants (missing exactly one offline signer's signature blocks the whole
+  close, LIM-03) and a mixed valid-CLOSE-plus-valid-STATE-purpose signer set (rejected as a whole,
+  not partially ignored); `close()` with `Parent != null` re-checked with an otherwise-fully-valid
+  signature set, confirming the parent check is a hard gate, not something a complete signer set
+  can route around; `disassociate()` re-checked with 3 children (not the developer's own 2) and the
+  corruption placed on the THIRD child specifically, confirming no direct child's `Parent` is reset
+  when any one signature fails (not just "the last one checked"); a direct confirmation that
+  disassociate() accepts a signature from a non-leader member of a child's own P, matching the
+  contract's own documented GAP-60/82 simplification; `UpdateAccepted` event count re-checked
+  (exactly 1 for an accepted call, 0 for a reverted one) plus an ABI-level scan of every exported
+  function name for anything history/past/all-states-shaped (none found), on top of the direct
+  source-code review below; a direct test that Close signatures collected in a non-leader-first
+  order still succeed, probing for any hidden leader/participant role distinction in `RoleSigner`'s
+  on-chain use.
+
+Also checked (no new test file, verified by direct execution/inspection):
+- `contracts/HMSC.sol` read in full: confirmed the `Instance` struct has exactly Gamma's seven
+  fields plus the one user-approved `closed` field (ARCH-003/ARCH-011); confirmed the function list
+  is exactly `createInstanceForTesting`, `getInstance`, `update`, `onlineMsg`, `close`,
+  `disassociate`, `selectNewLeader` — no `init`/`federate`/`disputeMsg`/`offlineMsg`
+  challenge-window/`finalizeOffline` entry point exists; confirmed there is no on-chain history
+  array anywhere in contract storage (only `instances[sid].entries`, the single current state, plus
+  the `UpdateAccepted` event) — SC-007; confirmed no `startBlock`/cancellation/`FinalizeOffline`
+  code exists anywhere in the contract (grepped) beyond doc-comment mentions of what is *not* built.
+- `hmsc/chain`: ran `TestDialConnectsToRealEVM` in isolation (`-count=1`, bypassing the test cache)
+  and as part of the full suite; checked running `node.exe`/`cmd.exe` processes via
+  `Get-CimInstance Win32_Process` before and after each run (PowerShell) — the only `node.exe`
+  present before, during and after every run was an unrelated pre-existing Adobe Creative Cloud
+  process (confirmed by its command line), never a Hardhat node; also confirmed TCP port 8598 (the
+  test's fixed port) is not left listening after the test exits. No orphaned process found; the
+  developer's documented `npx`/cmd.exe-avoidance fix (invoking `node cli.js` directly) holds.
+  Deliberately re-ran this check fresh (not relying on the developer's own note) per the task's
+  explicit instruction to verify, not trust, the process-leak fix.
+- `internal/spec/spec.go`: confirmed via `git log -p -- internal/spec/spec.go` (all commits, not
+  just the working tree) that commit `63d73a3` both reverted the stray uncommitted
+  `RoleLeader`/`RoleParticipant` staging (per its own commit message, matching the tracker's
+  correction narrative) and added the single generic `RoleSigner = 0x01` constant in the same
+  commit — i.e. the fix was actually committed, not just claimed. Repo-wide `Grep` for
+  `RoleLeader|RoleParticipant` across the whole tree found zero hits in any tracked or working-tree
+  file except TRACKER.md's own prose describing the history. `RoleSigner`'s doc comment and its two
+  Solidity call sites (`update`/`close`/`disassociate` and `onlineMsg` all use the single
+  `ROLE_SIGNER` constant) confirmed to carry no leader/participant branching anywhere on chain —
+  corroborated by the new "non-leader-first signature order still succeeds" JS test above.
+- `hmsc/dispute`: confirmed by reading `dispute.go` that `CheckpointSelection`'s signature is
+  `func CheckpointSelection(signedSerials []uint64) (uint64, bool)` — no `ChildList` parameter, no
+  own-state/child-state distinction — i.e. it genuinely implements only the no-children case
+  (DISPUTE-005/009), not a secretly-broader Alg. 4 lines 10-24 implementation.
+- Cross-language layout consistency: read `globalstate.GlobalState.Encode` (Go) and
+  `contracts/HMSC.sol`'s `_digest`/`test/helpers.js`'s `digestFor` side by side and confirmed all
+  three produce the identical `uint64 nu (BE) || uint32 entry_count (BE) || entries` byte layout
+  the GAP-73 freeze specifies — not just trusted by doc-comment claim.
+- M8/TEST-42 spot check on the M5-M7 diff: `Grep` for `^\s*go |go func` across
+  `hmsc/confirm`, `hmsc/dispute`, `hmsc/offline`, `hmsc/closure` and `contracts/HMSC.sol` found
+  goroutines only in `hmsc/closure/closure_test.go` (test-harness orchestration), none in any
+  protocol/algorithm implementation file.
+
+No M5, M6 or M7 box was unchecked. No new protocol gap was found. One thing double-checked and
+confirmed NOT a problem: the M6/M7 "Do NOT implement yet" callouts (CONFIRM-003/004's on-chain
+anchor-derived leader mechanic, CONFIRM-010/011/012 parent/child propagation, CONFIRM-008/009's
+leader-signs/countersigns flow, UPDATE-002/003/006/008/009..012, DISPUTE-001..004/006..008/010/
+011/013..019, OFFLINE-001..004/007..009/016) were all confirmed absent from the actual diff by
+direct source review, not just by the tracker's own prose — in particular, UPDATE-006's exact
+signer-count rule is confirmed genuinely unimplemented in either direction (both under- and
+over-inclusive signer counts accepted by `update()`), which was this pass's single most
+safety-critical thing to get right (an accidental partial implementation of a blocked rule would be
+a "helpfully" unblocked violation of the tracker's own binding rules, not just a missed feature).
