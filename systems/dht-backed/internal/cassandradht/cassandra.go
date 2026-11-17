@@ -1,0 +1,186 @@
+package cassandradht
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+
+	gocql "github.com/apache/cassandra-gocql-driver/v2"
+
+	"dhtbacked/internal/hashing"
+)
+
+// Keyspace is the Cassandra keyspace holding the DHT-backed proof records and
+// routing table; fair-persistence/cassandra/dht-backed.cql creates it.
+const Keyspace = "dhtbacked"
+
+const (
+	selectProof = "SELECT payload FROM proof_entries WHERE proof_key = ?"
+	insertProof = "INSERT INTO proof_entries (proof_key, payload) VALUES (?, ?)"
+	selectRoute = "SELECT next_peer FROM routing_table WHERE peer = ? AND level = ?"
+	insertRoute = "INSERT INTO routing_table (peer, level, next_peer) VALUES (?, ?, ?)"
+)
+
+// Cassandra is the KV a DHT sits on: proof_entries holds the records and
+// routing_table the overlay's routing state.
+type Cassandra struct {
+	session       *gocql.Session
+	keyspace      string
+	maxValueBytes int
+}
+
+var _ KV = (*Cassandra)(nil)
+
+// Open connects to the cluster at host:port.
+func Open(host string, port int) (*Cassandra, error) {
+	if host == "" {
+		return nil, errors.New("cassandradht: Cassandra host is required")
+	}
+	if port <= 0 {
+		return nil, fmt.Errorf("cassandradht: invalid Cassandra port %d", port)
+	}
+	cluster := gocql.NewCluster(host)
+	cluster.Port = port
+	cluster.Keyspace = Keyspace
+	session, err := cluster.CreateSession()
+	if err != nil {
+		return nil, fmt.Errorf("cassandradht: connect: %w", err)
+	}
+	return &Cassandra{session: session}, nil
+}
+
+// Close releases the session.
+func (c *Cassandra) Close() {
+	if c != nil && c.session != nil {
+		c.session.Close()
+	}
+}
+
+// Proof reads the value stored at key.
+func (c *Cassandra) Proof(ctx context.Context, key hashing.Digest) ([]byte, error) {
+	var payload []byte
+	err := c.session.Query("SELECT payload FROM "+c.table("proof_entries")+" WHERE proof_key = ?", key[:]).ScanContext(ctx, &payload)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if c.maxValueBytes > 0 && len(payload) > c.maxValueBytes {
+		return nil, errors.New("cassandradht: stored proof exceeds value bound")
+	}
+	return payload, nil
+}
+
+// Route reads one routing-table row.
+func (c *Cassandra) Route(ctx context.Context, peer, level int) (int, error) {
+	var next int
+	if err := c.session.Query("SELECT next_peer FROM "+c.table("routing_table")+" WHERE peer = ? AND level = ?", peer, level).ScanContext(ctx, &next); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+// Reset removes every proof record and routing row.
+func (c *Cassandra) Reset(ctx context.Context) error {
+	if c.keyspace != "" {
+		return errors.New("cassandradht: active proof history cannot be reset through the legacy fixture API")
+	}
+	for _, table := range []string{"proof_entries", "routing_table"} {
+		if err := c.session.Query("TRUNCATE " + table).ExecContext(ctx); err != nil {
+			return fmt.Errorf("cassandradht: truncate %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+// SeedRoutes writes the routing table for a DHT of the given size: one row per
+// (peer, level), pointing at the peer one bit-flip away.
+func (c *Cassandra) SeedRoutes(ctx context.Context, peers int) error {
+	for peer := 0; peer < peers; peer++ {
+		for level := 0; level < Hops(peers); level++ {
+			if err := c.session.Query(insertRoute, peer, level, RouteNext(peer, level)).ExecContext(ctx); err != nil {
+				return fmt.Errorf("cassandradht: seed route (%d,%d): %w", peer, level, err)
+			}
+		}
+	}
+	return nil
+}
+
+// Seeder bulk-loads proof records with a bounded pool of writers. It is setup
+// work, outside every measured request.
+type Seeder struct {
+	ctx  context.Context
+	c    *Cassandra
+	rows chan seedRow
+	wait sync.WaitGroup
+
+	closeOnce sync.Once
+	mu        sync.Mutex
+	firstErr  error
+}
+
+type seedRow struct {
+	key     hashing.Digest
+	payload []byte
+}
+
+// NewSeeder starts writers workers.
+func (c *Cassandra) NewSeeder(ctx context.Context, writers int) *Seeder {
+	s := &Seeder{ctx: ctx, c: c, rows: make(chan seedRow, writers*64)}
+	s.wait.Add(writers)
+	for range writers {
+		go func() {
+			defer s.wait.Done()
+			for row := range s.rows {
+				if s.Err() != nil {
+					continue
+				}
+				err := c.session.Query(insertProof, row.key[:], row.payload).ExecContext(ctx)
+				if err != nil {
+					s.setErr(fmt.Errorf("cassandradht: write proof record: %w", err))
+				}
+			}
+		}()
+	}
+	return s
+}
+
+// Put queues one record. The caller must not modify payload afterwards.
+func (s *Seeder) Put(key hashing.Digest, payload []byte) error {
+	if err := s.Err(); err != nil {
+		return err
+	}
+	select {
+	case s.rows <- seedRow{key: key, payload: payload}:
+		return nil
+	case <-s.ctx.Done():
+		return s.ctx.Err()
+	}
+}
+
+// Flush waits for every queued record to be written and stops the writers. The
+// Seeder cannot be used afterwards.
+func (s *Seeder) Flush() error {
+	s.closeOnce.Do(func() {
+		close(s.rows)
+		s.wait.Wait()
+	})
+	return s.Err()
+}
+
+func (s *Seeder) setErr(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.firstErr == nil {
+		s.firstErr = err
+	}
+}
+
+// Err returns the first write failure, if any.
+func (s *Seeder) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.firstErr
+}

@@ -1,0 +1,65 @@
+# ---------------------------------------------------------------------------
+# Root .gitignore. Per-module .gitignore files (systems/delia, systems/dht-backed)
+# add their own rules; the systems/hmf-audit submodule has its own repository.
+# ---------------------------------------------------------------------------
+
+# --- Secrets: never commit private keys or local environment files ---------
+*.key
+*.sk
+*.pem
+.env
+.env.*
+
+# --- Third-party material: papers and inputs for other work ---------------
+*.pdf
+/other-paper-input/
+
+# --- Datasets: too large for git (GitHub rejects files over 100 MB). -------
+# See dataset/README.md for how to download and regenerate them.
+/dataset/Spark/
+/dataset/Spark.replaced-*/
+/dataset/downloads/
+/dataset/.spark-extract/
+/dataset/combined/.build-*/
+/dataset/combined/*.jsonl
+# Generated benchmark subsets (rebuilt by dataset/scripts/select_fair_subset.go)
+/systems/experiments/datasets/
+
+# --- Experiment results are not committed: regenerate them with
+# --- systems/experiments/scripts/run_pipeline (CSV summaries, figures, raw output, logs).
+/systems/experiments/results/
+/systems/fair-results-*/
+*.partial
+
+# --- Build, cache and runtime artefacts ------------------------------------
+# Hardhat compile output (the Go code uses the tracked contract bindings)
+/systems/EVBES/artifacts/
+/systems/EVBES/cache/
+.cache/
+tmp/
+**/__pycache__/
+*.pyc
+*.exe
+*.test
+*.out
+*.log
+.smoke/
+node_modules/
+
+# --- Deployment-specific and report files (not part of the submission) ------
+# Cloud peer addresses and DHT-backed's own evaluation output.
+/systems/dht-backed/internal/peerdht/deployment.json
+/systems/dht-backed/internal/peerdht/deployment.node*.json
+/systems/dht-backed/internal/peerdht/DEPLOYMENT.md
+/systems/dht-backed/reports/
+
+# --- Local tool and editor state -------------------------------------------
+/.claude/
+/systems/.claude/
+**/.claude/settings.json
+**/.claude/settings.local.json
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

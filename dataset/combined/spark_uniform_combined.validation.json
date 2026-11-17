@@ -1,0 +1,33 @@
+{
+  "dataset": "spark_uniform_combined",
+  "applications": 194,
+  "container_files": 3852,
+  "total_records": 33236604,
+  "records_with_inferred_attributes": {
+    "preamble": 1261,
+    "continuation": 5825093
+  },
+  "record_count_per_region": {
+    "R0": 8312282,
+    "R1": 8309955,
+    "R2": 8303824,
+    "R3": 8310543
+  },
+  "record_count_per_service": {
+    "spark-application-master": 993387,
+    "spark-executor": 32243217
+  },
+  "record_count_per_log_type": {
+    "ERROR": 142882,
+    "INFO": 33034496,
+    "UNSPECIFIED": 1261,
+    "WARN": 57965
+  },
+  "distinct_tenants": 1000,
+  "checks": {
+    "one_record_per_raw_line": true,
+    "all_regions_used": true,
+    "every_record_has_time_and_type": true
+  },
+  "all_checks_passed": true
+}

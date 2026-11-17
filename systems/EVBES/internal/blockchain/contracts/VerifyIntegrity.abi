@@ -1,0 +1,1 @@
+[{"inputs":[{"internalType":"bytes32","name":"newRoot","type":"bytes32"}],"name":"updateMerkleRoot","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"verifyIntegrity","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"}]

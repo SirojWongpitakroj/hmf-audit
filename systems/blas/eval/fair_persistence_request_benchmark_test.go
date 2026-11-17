@@ -1,0 +1,348 @@
+package eval
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/gob"
+	"encoding/json"
+	"fmt"
+	"os"
+	"runtime"
+	"sync"
+	"testing"
+
+	"blas/alis"
+	"blas/chain"
+	"blas/iomf"
+	"blas/query"
+	"blas/verify"
+	"github.com/jackc/pgx/v5"
+)
+
+type fairBLASScenario struct {
+	placement string
+	batchSize int
+	request   query.Q
+}
+
+type fairBLASRequestResult struct {
+	result        verify.Result
+	response      verify.Response
+	postgresReads int
+	loadedBytes   int
+}
+
+// BenchmarkFairBLASVerificationRequest measures the complete request after it
+// arrives: full-node Stage 1-2 proof generation over the on-chain indexes,
+// SP retrieval of the off-chain log files from PostgreSQL with Stage 3 proof
+// generation, and final auditor verification of all three stages.
+func BenchmarkFairBLASVerificationRequest(b *testing.B) {
+	b.StopTimer()
+	ctx := context.Background()
+	state := sharedFairBLAS(b)
+	database, fullNode, registry, auditor := state.database, state.fullNode, state.registry, state.auditor
+	options := verify.Options{UseSegmentScan: true, UseAggregation: true}
+
+	scenarios := make([]fairBLASScenario, 0, 2*len(fairBLASBatchSizes))
+	for _, placement := range fairBLASPlacements {
+		for _, batchSize := range fairBLASBatchSizes {
+			expression := iomf.Keyword(fairBLASBatchKeyword(placement, batchSize))
+			scenarios = append(scenarios, fairBLASScenario{
+				placement: placement,
+				batchSize: batchSize,
+				request:   query.Q{LG: 0, FK: expression, EK: expression},
+			})
+		}
+	}
+
+	for _, scenario := range scenarios {
+		scenario := scenario
+		b.Run(fmt.Sprintf("%s/q=%d", scenario.placement, scenario.batchSize), func(b *testing.B) {
+			b.StopTimer()
+			probe, err := executeFairBLASRequest(ctx, database, fullNode, registry, auditor, scenario, options)
+			if err != nil {
+				b.Fatal(err)
+			}
+			validateFairBLASRequestResult(b, scenario, probe)
+
+			warmup := fairBLASWarmupCount(b)
+			for range warmup {
+				outcome, err := executeFairBLASRequest(ctx, database, fullNode, registry, auditor, scenario, options)
+				if err != nil {
+					b.Fatal(err)
+				}
+				validateFairBLASRequestResult(b, scenario, outcome)
+				fairBLASResult = outcome.result
+			}
+
+			b.ResetTimer()
+			b.ReportMetric(float64(scenario.batchSize), "records/op")
+			if os.Getenv("FAIR_REGION0_RECORDS") != "" {
+				b.ReportMetric(8, "workload-version/op")
+			}
+			b.ReportMetric(float64(state.datasetRecords), "dataset-records")
+			b.ReportMetric(float64(state.blocks), "blocks")
+			b.ReportMetric(float64(len(probe.response.Files)), "response-files/op")
+			b.ReportMetric(float64(VOSize(
+				probe.response.Stage1, probe.response.Stage2,
+				probe.response.Files, probe.response.Bindings,
+			)), "evidence-bytes/op")
+			b.ReportMetric(float64(probe.loadedBytes), "cloud-bytes/op")
+			b.ReportMetric(float64(state.cloudFiles), "persisted-cloud-files")
+			b.ReportMetric(float64(state.cloudBytes), "persisted-cloud-bytes")
+			b.ReportMetric(float64(probe.postgresReads), "postgres-reads/op")
+			b.ReportMetric(1, "proof-generation/op")
+			b.ReportMetric(float64(warmup), "warmup-ops")
+			b.StartTimer()
+			for range b.N {
+				outcome, err := executeFairBLASRequest(ctx, database, fullNode, registry, auditor, scenario, options)
+				if err != nil {
+					b.Fatal(err)
+				}
+				validateFairBLASRequestResult(b, scenario, outcome)
+				fairBLASResult = outcome.result
+			}
+		})
+	}
+}
+
+func validateFairBLASRequestResult(b testing.TB, scenario fairBLASScenario,
+	outcome fairBLASRequestResult) {
+	b.Helper()
+	if !outcome.result.Accept || len(outcome.result.Entries) != scenario.batchSize {
+		b.Fatalf("BLAS %s q=%d: accepted=%v entries=%d",
+			scenario.placement, scenario.batchSize,
+			outcome.result.Accept, len(outcome.result.Entries))
+	}
+}
+
+func executeFairBLASRequest(ctx context.Context, database *pgx.Conn,
+	fullNode *query.FullNode, registry map[uint64][]string, auditor *verify.Auditor,
+	scenario fairBLASScenario, options verify.Options) (fairBLASRequestResult, error) {
+	provider := query.NewPostgresSP(ctx, database)
+	response, ok := auditor.PrepareResponse(
+		fullNode, provider, registry, scenario.request, options,
+	)
+	if !ok {
+		return fairBLASRequestResult{}, fmt.Errorf(
+			"BLAS proof generation failed for %s q=%d",
+			scenario.placement, scenario.batchSize,
+		)
+	}
+	reads, loadedBytes := provider.Stats()
+	return fairBLASRequestResult{
+		result:        auditor.VerifyResponse(registry, scenario.request, response, options),
+		response:      response,
+		postgresReads: reads,
+		loadedBytes:   loadedBytes,
+	}, nil
+}
+
+func encodeFairBLASValue(value any) ([]byte, error) {
+	var output bytes.Buffer
+	if err := gob.NewEncoder(&output).Encode(value); err != nil {
+		return nil, err
+	}
+	return output.Bytes(), nil
+}
+
+// fairBLASState is the persisted BLAS fixture. BLAS Sec. III: raw logs and
+// the entry-level index are off-chain with the SP, so they are read from
+// PostgreSQL on every request. The block- and transaction-level indexes are
+// on-chain and stay with the full node, as every system's blockchain state
+// stays outside the persistence layer. The registry is the on-chain keyword
+// set file (the build keeps it beside the chain rather than registering it on
+// the Chain value).
+type fairBLASState struct {
+	database       *pgx.Conn
+	fullNode       *query.FullNode
+	auditor        *verify.Auditor
+	registry       map[uint64][]string
+	blocks         int
+	datasetRecords int
+	cloudFiles     int
+	cloudBytes     int
+}
+
+// TestMain closes the shared fixture's connection once every benchmark in the
+// process has finished. A per-benchmark cleanup cannot do it: the fixture
+// outlives the benchmark that happened to seed it.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if state := fairBLASShared.state; state != nil {
+		_ = state.database.Close(context.Background())
+	}
+	os.Exit(code)
+}
+
+// fairBLASShared holds that fixture for the whole test process: building the
+// chain and writing the entry files is setup, not part of any measured
+// request, so it runs once and is shared by every -count repetition.
+var fairBLASShared struct {
+	once  sync.Once
+	state *fairBLASState
+	err   error
+}
+
+func sharedFairBLAS(b *testing.B) *fairBLASState {
+	b.Helper()
+	if os.Getenv("FAIR_PERSISTENCE") != "1" {
+		b.Fatal("FAIR_PERSISTENCE=1 is required; use the shared runner")
+	}
+	fairBLASShared.once.Do(func() {
+		fairBLASShared.state, fairBLASShared.err = seedFairBLAS(context.Background())
+	})
+	if fairBLASShared.err != nil {
+		b.Fatal(fairBLASShared.err)
+	}
+	return fairBLASShared.state
+}
+
+func seedFairBLAS(ctx context.Context) (*fairBLASState, error) {
+	database, err := pgx.Connect(ctx, os.Getenv("FAIR_POSTGRES_DSN"))
+	if err != nil {
+		return nil, fmt.Errorf("connect PostgreSQL: %w", err)
+	}
+	cfg := Config{
+		NumGenerators: 1, EntriesPerFile: 128, FilesPerBlock: 8,
+		Fanout: 4, SegmentSize: 8, Seed: 1, UseAggregation: true,
+	}
+	vocabulary, total, err := fairBLASVocabulary()
+	if err != nil {
+		return nil, err
+	}
+	build, err := buildAndPersistFairBLAS(ctx, database, cfg, vocabulary, total)
+	if err != nil {
+		return nil, fmt.Errorf("persist BLAS off-chain storage: %w", err)
+	}
+	headers := make([]chain.BlockHeader, len(build.chain.Blocks()))
+	for index, block := range build.chain.Blocks() {
+		headers[index] = block.Header
+	}
+	if _, ok := build.registry[0]; !ok {
+		return nil, fmt.Errorf("shared dataset did not produce BLAS log generator 0")
+	}
+	runtime.GC()
+	return &fairBLASState{
+		database: database, fullNode: query.NewFullNode(build.chain),
+		auditor: verify.NewAuditor(headers, cfg.SegmentSize), registry: build.registry,
+		blocks: len(headers), datasetRecords: total,
+		cloudFiles: build.files, cloudBytes: build.bytes,
+	}, nil
+}
+
+type fairBLASBuild struct {
+	chain    *chain.Chain
+	registry map[uint64][]string
+	files    int
+	bytes    int
+}
+
+// buildAndPersistFairBLAS streams the shared dataset into BLAS: entries are
+// packed into ALIS entry files, each file is COPYed into PostgreSQL as it is
+// closed and then dropped, and its metadata goes on-chain a block at a time.
+// Setup therefore holds the chain, not the dataset or the entry files.
+func buildAndPersistFairBLAS(ctx context.Context, database *pgx.Conn, cfg Config,
+	vocabulary []string, total int) (*fairBLASBuild, error) {
+	file, err := os.Open(os.Getenv("FAIR_DATASET_PATH"))
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 4<<20)
+
+	logChain, err := chain.NewChainWithOptions(cfg.Fanout, cfg.SegmentSize, cfg.UseAggregation)
+	if err != nil {
+		return nil, err
+	}
+	build := &fairBLASBuild{chain: logChain, registry: map[uint64][]string{}}
+	generator := alis.NewLogGenerator(0)
+	batchKeywords := fairBLASBatchKeywords(total)
+	var pending []alis.FileMetadata
+	var fid uint64
+	ordinal, region := 0, -1
+
+	// addScannedEntry adds the line the scanner currently holds.
+	addScannedEntry := func(builder *alis.EntryFileBuilder) error {
+		var input fairBLASDatasetRecord
+		if err := json.Unmarshal(scanner.Bytes(), &input); err != nil {
+			return fmt.Errorf("decode shared dataset record %d: %w", ordinal, err)
+		}
+		if err := validateFairBLASRecord(input, ordinal, &region); err != nil {
+			return err
+		}
+		keywords := append(fairBLASKeywords(vocabulary, input.RawLog), batchKeywords[ordinal]...)
+		if _, err := builder.AddEntry(fairBLASTimestamp(input.RawLog, ordinal),
+			keywords, []byte(input.RawLog)); err != nil {
+			return err
+		}
+		ordinal++
+		return nil
+	}
+	// nextFile builds and encodes one entry file, or returns a nil row when
+	// the dataset is exhausted.
+	nextFile := func() ([]any, error) {
+		if !scanner.Scan() {
+			return nil, scanner.Err()
+		}
+		builder, err := alis.NewEntryFileBuilder(generator, fid, cfg.Fanout)
+		if err != nil {
+			return nil, err
+		}
+		for entries := 0; ; {
+			if err := addScannedEntry(builder); err != nil {
+				return nil, err
+			}
+			if entries++; entries == cfg.EntriesPerFile || !scanner.Scan() {
+				break
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, err
+		}
+		entryFile, meta, err := builder.Close()
+		if err != nil {
+			return nil, err
+		}
+		payload, err := encodeFairBLASValue(entryFile)
+		if err != nil {
+			return nil, fmt.Errorf("encode file %d: %w", fid, err)
+		}
+		pending = append(pending, meta)
+		if len(pending) == cfg.FilesPerBlock {
+			if _, err := logChain.AddBlock(pending); err != nil {
+				return nil, err
+			}
+			pending = nil
+		}
+		build.files++
+		build.bytes += len(payload)
+		row := []any{int64(0), int64(fid), payload}
+		fid++
+		return row, nil
+	}
+
+	if _, err := database.Exec(ctx, "TRUNCATE TABLE blas.entry_files"); err != nil {
+		return nil, err
+	}
+	inserted, err := database.CopyFrom(ctx, pgx.Identifier{"blas", "entry_files"},
+		[]string{"lid", "fid", "payload"}, pgx.CopyFromFunc(nextFile))
+	if err != nil {
+		return nil, err
+	}
+	if inserted != int64(build.files) {
+		return nil, fmt.Errorf("persisted %d BLAS files, want %d", inserted, build.files)
+	}
+	if len(pending) > 0 {
+		if _, err := logChain.AddBlock(pending); err != nil {
+			return nil, err
+		}
+	}
+	if ordinal != total {
+		return nil, fmt.Errorf("streamed %d BLAS records, want %d", ordinal, total)
+	}
+	build.registry[0] = generator.KeywordUniverse()
+	return build, nil
+}

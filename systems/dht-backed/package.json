@@ -1,0 +1,14 @@
+{
+  "name": "dhtbacked-anchor",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Local EVM anchoring chain for the DHT-backed reproduction (Table 5: Hardhat v2.20, Solidity 0.8.20).",
+  "scripts": {
+    "node": "hardhat node",
+    "deploy": "hardhat run scripts/deploy.js --network localhost"
+  },
+  "devDependencies": {
+    "ethers": "^6.11.1",
+    "hardhat": "2.20.1"
+  }
+}

@@ -1,0 +1,66 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: fair-postgres
+    environment:
+      POSTGRES_USER: fair
+      POSTGRES_PASSWORD: fairdev
+      POSTGRES_DB: fair_benchmark
+    ports:
+      - "55432:5432"
+    volumes:
+      - fair-postgres-data:/var/lib/postgresql/data
+      - ./docker/postgresql/001-fair-benchmark.sql:/docker-entrypoint-initdb.d/001-fair-benchmark.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fair -d fair_benchmark"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  cassandra:
+    image: cassandra:5.0.9
+    container_name: fair-cassandra
+    environment:
+      CASSANDRA_CLUSTER_NAME: fair-cluster
+      CASSANDRA_DC: datacenter1
+      MAX_HEAP_SIZE: 2G
+      HEAP_NEWSIZE: 400M
+    ports:
+      - "19042:9042"
+    volumes:
+      - fair-cassandra-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  cassandra-init:
+    image: cassandra:5.0.9
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      - ./docker/cassandra/init-hmf.cql:/init-hmf.cql:ro
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        cqlsh cassandra 9042 -f /init-hmf.cql
+
+  evseb-cassandra-init:
+    image: cassandra:5.0.9
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      - ./docker/cassandra/init-evseb.cql:/init-evseb.cql:ro
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        cqlsh cassandra 9042 -f /init-evseb.cql
+
+volumes:
+  fair-postgres-data:
+  fair-cassandra-data:

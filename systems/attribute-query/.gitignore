@@ -1,0 +1,4 @@
+# Encryption keys must never be committed.
+keys/
+*.key
+bin/

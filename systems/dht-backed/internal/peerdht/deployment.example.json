@@ -1,0 +1,21 @@
+{
+  "Node": 0,
+  "Listen": ":8080",
+  "Overlay": "canonical-v1",
+  "CAFile": "../../dht-live-keys/ca.pk",
+  "Peers": ["http://10.0.0.1:8080", "http://10.0.0.2:8080", "http://10.0.0.3:8080", "http://10.0.0.4:8080"],
+  "TimeoutSeconds": 30,
+  "Limits": {
+    "Workers": 8,
+    "MaxRequests": 32768,
+    "QueueBytes": 65536,
+    "MaxValueBytes": 65536,
+    "MaxRequestBytes": 131072,
+    "ProofBytes": 8388608,
+    "AncestorMapBytes": 33554432,
+    "CacheBytes": 67108864,
+    "CacheEntries": 65536,
+    "RecordFetchBatch": 256,
+    "RecordBytes": 8388608
+  }
+}
