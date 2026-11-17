@@ -43,8 +43,11 @@ tmp/
 *.test
 *.out
 *.log
+# ...except the test fixture the BLAS unit tests read
+!/systems/blas/eval/testdata/*.log
 .smoke/
 node_modules/
+.venv/
 
 # --- Deployment-specific and report files (not part of the submission) ------
 # Cloud peer addresses and DHT-backed's own evaluation output.
