@@ -9,7 +9,7 @@
 # Output: the log count, the log IDs, and Status VALID (verification passed) or
 # REJECTED (verification failed). Exit code: 0 VALID, 1 REJECTED, 2 error.
 # Options: --max-ids N (IDs printed, default 100, -1 for all), --json.
-# Local Docker only. Ingest first with: systems/attribute-query/ingest.sh --records 100000
+# Local Docker only. Ingest first with: ./ingest.sh (this folder)
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 

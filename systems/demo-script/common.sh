@@ -41,7 +41,7 @@ require_100k() {
     local rows
     rows="$(docker exec fair-postgres psql -U fair -d fair_benchmark -t -A \
         -c 'SELECT count(*) FROM hmfq.encrypted_logs' 2>/dev/null || true)"
-    [[ "$rows" == "$EXPECTED_RECORDS" ]] || die "needs the 100k ingest (found '${rows:-no database}' rows in hmfq.encrypted_logs); run: systems/attribute-query/ingest.sh --records 100000"
+    [[ "$rows" == "$EXPECTED_RECORDS" ]] || die "needs the 100k ingest (found '${rows:-no database}' rows in hmfq.encrypted_logs); run: ./ingest.sh (from systems/demo-script)"
 }
 
 # audit_query: run the auditor for the parsed query. Sets AUDIT_OUT / AUDIT_ERR

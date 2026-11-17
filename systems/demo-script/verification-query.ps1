@@ -7,7 +7,7 @@
 # Output: the log count, the log IDs, and Status VALID (verification passed) or
 # REJECTED (verification failed). Exit code: 0 VALID, 1 REJECTED, 2 error.
 # Options: -MaxIds N (IDs printed, default 100, -1 for all), -Json.
-# Local Docker only. Ingest first with: systems\attribute-query\ingest.ps1 -Records 100000
+# Local Docker only. Ingest first with: .\ingest.ps1 (this folder)
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Tenant,

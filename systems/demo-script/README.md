@@ -136,9 +136,10 @@ Other options: `--max-ids N` (IDs printed; default 100, `-1` for all), `--json`
 
 ## Requirements
 
-* The 100k ingest in the local Docker stack: `systems/attribute-query/ingest.sh
-  --records 100000` (the demo checks the database holds exactly 100,000 logs and
-  stops with that command if not).
+* The 100k ingest in the local Docker stack, run from this folder: `./ingest.sh`
+  (bash) or `.\ingest.ps1` (PowerShell). It wraps `systems/attribute-query/ingest`;
+  add `--reset` / `-Reset` to empty the demo's tables first. The demo checks the
+  database holds exactly 100,000 logs and stops with that command if not.
 * Go, Docker, Python 3.9+. The demo builds `cmd/hmf-auditor` into
   `systems/attribute-query/bin/` and runs it; it talks to the local database only.
 

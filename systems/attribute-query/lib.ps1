@@ -1,7 +1,7 @@
 # Shared helpers for ingest.ps1 and query.ps1. Dot-source this file; do not run it.
 # Everything targets the local Docker stack in systems/fair-persistence
 # (PostgreSQL 127.0.0.1:55432, Cassandra 127.0.0.1:19042).
-. (Join-Path $PSScriptRoot "..\experiments\lib.ps1")
+. (Join-Path $PSScriptRoot "..\experiments\scripts\lib.ps1")
 $script:AqDir = $PSScriptRoot
 $script:KeyFile = Join-Path $script:AqDir "keys\hmf-ingest.key"
 $script:Keyspace = "hmf_audit_q"

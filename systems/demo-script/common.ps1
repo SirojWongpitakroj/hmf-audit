@@ -47,7 +47,7 @@ function Assert-Demo100k {
     $python = Find-Python
     try { $rows = (Invoke-Provider "SELECT count(*) FROM hmfq.encrypted_logs") -join "" } catch { $rows = "" }
     if ($rows -ne "$script:ExpectedRecords") {
-        Stop-Demo "needs the 100k ingest (found '$rows' rows in hmfq.encrypted_logs); run: systems\attribute-query\ingest.ps1 -Records 100000"
+        Stop-Demo "needs the 100k ingest (found '$rows' rows in hmfq.encrypted_logs); run: .\ingest.ps1 (from systems\demo-script)"
     }
     return $python
 }

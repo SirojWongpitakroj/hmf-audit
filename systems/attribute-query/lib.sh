@@ -4,7 +4,7 @@
 # (PostgreSQL 127.0.0.1:55432, Cassandra 127.0.0.1:19042).
 AQ_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
-. "$AQ_DIR/../experiments/lib.sh"
+. "$AQ_DIR/../experiments/scripts/lib.sh"
 KEY_FILE="$AQ_DIR/keys/hmf-ingest.key"
 KEYSPACE=hmf_audit_q
 
