@@ -199,6 +199,9 @@ func buildFairDHTPersistentFixture(
 	proofStore *cassandradht.Cassandra,
 	peers int,
 ) (*fairDHTPersistentFixture, error) {
+	// Setup only: seeding is not timed, so it may use every core. The timed
+	// requests run again under the process's GOMAXPROCS (1).
+	defer raiseFairSetupProcs()()
 	recordCount, err := countFairDHTRecords(datasetPath)
 	if err != nil {
 		return nil, fmt.Errorf("count shared dataset: %w", err)

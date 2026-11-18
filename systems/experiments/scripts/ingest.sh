@@ -6,6 +6,14 @@
 #   ingest.sh --records 100000        generated from the source dataset (deterministic)
 #   ingest.sh --records 10000000      the existing 10M file (SHA-256 checked)
 #   ingest.sh --records N --systems hmf-audit,evseb     (subset of the four schemes)
+#   ingest.sh --records N --parallel                    (ingest the schemes at the same time)
+#
+# --parallel starts every scheme's ingest as its own process at once. Each one
+# reads the same dataset file (read-only) and writes only its own keyspace or
+# schema, so the data is the same as in the sequential run. It only changes how
+# long you wait: in the cloud the schemes sit on different VMs, but the runner's
+# CPU and memory and the shared PostgreSQL VM (hmf, evseb and dht schemas) are
+# shared, so the speed-up is bounded by those. Nothing is timed during ingest.
 #
 # Ingestion reuses the unchanged fair fixtures: each scheme's fixture seeds the
 # database when its benchmark process starts, so this runs one minimal
@@ -19,13 +27,15 @@ set -euo pipefail
 ALLOWED_RECORDS=(100000 10000000)
 records=""
 ingest_systems="hmf-audit,dht-backed,blas,evseb"
+parallel=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
     --records) [[ $# -ge 2 ]] || die "--records needs a value"; records="$2"; shift 2 ;;
     --records=*) records="${1#--records=}"; shift ;;
     --systems) [[ $# -ge 2 ]] || die "--systems needs a value"; ingest_systems="$2"; shift 2 ;;
+    --parallel) parallel=1; shift ;;
     -h | --help)
-        echo "usage: ingest.sh --records 100000|10000000 [--systems hmf-audit,dht-backed,blas,evseb]" >&2
+        echo "usage: ingest.sh --records 100000|10000000 [--systems hmf-audit,dht-backed,blas,evseb] [--parallel]" >&2
         exit 0 ;;
     *) die "unknown option $1 (usage: ingest.sh --records 100000|10000000)" ;;
     esac
@@ -60,10 +70,28 @@ begin_experiment ingest --per-region $((records / REGIONS)) --count 1 --warmup 0
 write_environment ingest "$ingest_systems" "$RESULTS"
 
 started=$(date +%s)
-for system in "${selected[@]}"; do
-    note "ingesting $system ($records records)"
-    run_benchmark "${MODULE[$system]}" "${PACKAGE[$system]}" "${PATTERN[$system]}" "$RESULTS/$system.txt"
-done
+if [[ "$parallel" == 1 && ${#selected[@]} -gt 1 ]]; then
+    # One background job per scheme; each job's output also goes to its own
+    # $RESULTS/<system>.txt. A failed job does not stop the others, but the
+    # script fails after all of them have finished.
+    note "ingesting ${#selected[@]} schemes in parallel ($records records each)"
+    pids=()
+    for system in "${selected[@]}"; do
+        note "ingesting $system ($records records)"
+        run_benchmark "${MODULE[$system]}" "${PACKAGE[$system]}" "${PATTERN[$system]}" "$RESULTS/$system.txt" &
+        pids+=("$!")
+    done
+    failed=()
+    for index in "${!pids[@]}"; do
+        wait "${pids[$index]}" || failed+=("${selected[$index]}")
+    done
+    [[ ${#failed[@]} -eq 0 ]] || die "ingest failed for: ${failed[*]}; see $RESULTS/<system>.txt"
+else
+    for system in "${selected[@]}"; do
+        note "ingesting $system ($records records)"
+        run_benchmark "${MODULE[$system]}" "${PACKAGE[$system]}" "${PATTERN[$system]}" "$RESULTS/$system.txt"
+    done
+fi
 
 # Report what is actually in the database, and fail if it does not match.
 note "row counts in PostgreSQL"

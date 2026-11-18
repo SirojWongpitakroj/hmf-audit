@@ -111,6 +111,28 @@ Docker stack above is used and cannot be pointed at a remote database.
   one process per system). Because each experiment script re-seeds, expect the
   three scripts to take well over a day at 10M.
 
+## Setup speed (outside every timer)
+
+Seeding a fixture is not measured, so it is allowed to be faster than the timed
+requests. The timed protocol (`GOMAXPROCS=1`, 8-wide request concurrency, real DHT
+routing reads, no proof cache) is unchanged, and the stored rows are the same.
+
+* **GOMAXPROCS during seeding.** Every fixture raises it to the CPU count while it
+  seeds and restores it before the first timed request. `FAIR_SETUP_GOMAXPROCS=N`
+  overrides the count.
+* **EVSEB.** 4,096 records per PostgreSQL `COPY` (was 256); the Cassandra DHT is
+  written by 32 writers in unlogged batches of at most 256 entries. The 32 is
+  separate from `FAIR_EVSEB_DHT_CONCURRENCY` (8), which bounds timed lookups.
+* **DHT-backed.** 32 writers, each sending up to 32 queued records (at most 32 KiB)
+  as one unlogged batch instead of one `INSERT` per round trip; transient write
+  timeouts are retried (the inserts are idempotent).
+* **HMF-Audit.** 8 segment trees are written to Cassandra at once (was 4);
+  `FAIR_HMF_SEED_CONCURRENCY=N` overrides it.
+* **BLAS.** Only the GOMAXPROCS change; its load is one streaming `COPY`.
+
+`environment.txt` records this. If a Cassandra VM reports write timeouts while
+seeding, lower `FAIR_HMF_SEED_CONCURRENCY`.
+
 ## Known limitations
 
 * **DHT-backed fails at q = 4096 and q = 16384.** `systems/dht-backed` now has

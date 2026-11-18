@@ -74,6 +74,8 @@ def write_environment(args: argparse.Namespace) -> None:
         f"process_architecture={platform.machine()}",
         "cpu_allocation=1 logical CPU",
         "gomaxprocs=1",
+        "setup_gomaxprocs=all CPUs (FAIR_SETUP_GOMAXPROCS overrides) while a fixture is seeded; seeding is outside every timer, and each timed request runs at gomaxprocs=1",
+        "setup_writers=EVSEB 32 Cassandra writers and 4096-row PostgreSQL COPY, DHT-backed 32 writers with batches of up to 32 rows, HMF-Audit 8 segment writers (FAIR_HMF_SEED_CONCURRENCY); the timed concurrency of 8 is unchanged",
         "cgo_enabled=0",
         f"go_version={command_output('go', 'version')}",
         f"python_version={platform.python_version()}",

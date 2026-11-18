@@ -248,6 +248,9 @@ func sharedFairEVBES(b *testing.B) (*pgx.Conn, *fairEVBESCassandraDHT, *fairEVBE
 		b.Fatal("FAIR_PERSISTENCE=1 is required; use the shared runner")
 	}
 	fairEVBESShared.once.Do(func() {
+		// Setup only: seeding is not timed, so it may use every core. The
+		// timed requests run again under the process's GOMAXPROCS (1).
+		defer raiseFairSetupProcs()()
 		ctx := context.Background()
 		database, err := pgx.Connect(ctx, os.Getenv("FAIR_POSTGRES_DSN"))
 		if err != nil {
@@ -326,9 +329,9 @@ func seedFairEVBES(ctx context.Context, database *pgx.Conn, dht *fairEVBESCassan
 	leaves := make([]byte, 0, 1<<20) // level-0 digests, flat: 32 bytes a leaf
 	count := 0
 	region := -1
-	logRows := make([][]any, 0, 256)
-	positionRows := make([][]any, 0, 256)
-	dhtRows := make([]fairEVBESDHTEntry, 0, 256)
+	logRows := make([][]any, 0, fairEVBESSeedFlushRows)
+	positionRows := make([][]any, 0, fairEVBESSeedFlushRows)
+	dhtRows := make([]fairEVBESDHTEntry, 0, fairEVBESSeedFlushRows)
 	dhtSeeder := newFairEVBESDHTSeeder(ctx, dht)
 	dhtSeederOpen := true
 	defer func() {

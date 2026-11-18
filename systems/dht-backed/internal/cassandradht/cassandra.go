@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	gocql "github.com/apache/cassandra-gocql-driver/v2"
 
@@ -133,18 +134,99 @@ func (c *Cassandra) NewSeeder(ctx context.Context, writers int) *Seeder {
 	for range writers {
 		go func() {
 			defer s.wait.Done()
-			for row := range s.rows {
-				if s.Err() != nil {
-					continue
-				}
-				err := c.session.Query(insertProof, row.key[:], row.payload).ExecContext(ctx)
-				if err != nil {
-					s.setErr(fmt.Errorf("cassandradht: write proof record: %w", err))
-				}
-			}
+			s.drain(s.writeBatch)
 		}()
 	}
 	return s
+}
+
+const (
+	// seedBatchRows and seedBatchBytes bound one unlogged batch of proof
+	// records. The rows are in different partitions, and Cassandra rejects a
+	// batch above batch_size_fail_threshold (50 KiB), so the byte bound stays
+	// well below it. A single record larger than the bound is written alone.
+	seedBatchRows  = 32
+	seedBatchBytes = 32 << 10
+
+	seedWriteAttempts = 5
+)
+
+// drain takes queued rows off s.rows in groups of at most seedBatchRows rows
+// and seedBatchBytes bytes and passes each group to write. It never waits for
+// a group to fill: it takes what is already queued, so a slow producer gets
+// small batches rather than added latency. It returns when s.rows is closed
+// and empty. write must not keep the slice.
+func (s *Seeder) drain(write func([]seedRow)) {
+	batch := make([]seedRow, 0, seedBatchRows)
+	size := func(row seedRow) int { return len(row.key) + len(row.payload) }
+	for first := range s.rows {
+		batch = append(batch[:0], first)
+		bytes := size(first)
+	fill:
+		for len(batch) < seedBatchRows && bytes < seedBatchBytes {
+			select {
+			case row, ok := <-s.rows:
+				if !ok {
+					break fill
+				}
+				if bytes+size(row) > seedBatchBytes {
+					write(batch)
+					batch = append(batch[:0], row)
+					bytes = size(row)
+					continue
+				}
+				batch = append(batch, row)
+				bytes += size(row)
+			default:
+				break fill
+			}
+		}
+		write(batch)
+	}
+}
+
+// writeBatch writes rows as one unlogged batch (or one INSERT for a single
+// row). The inserts are idempotent, so a transient Cassandra failure is
+// retried a few times; anything else is recorded and stops the seeder.
+func (s *Seeder) writeBatch(rows []seedRow) {
+	if len(rows) == 0 || s.Err() != nil {
+		return
+	}
+	var err error
+	for attempt := 1; attempt <= seedWriteAttempts; attempt++ {
+		if err = s.ctx.Err(); err != nil {
+			break
+		}
+		if err = s.execBatch(rows); err == nil || !transientWriteError(err) || attempt == seedWriteAttempts {
+			break
+		}
+		select {
+		case <-s.ctx.Done():
+		case <-time.After(time.Duration(1<<(attempt-1)) * 100 * time.Millisecond):
+		}
+	}
+	if err != nil {
+		s.setErr(fmt.Errorf("cassandradht: write proof records: %w", err))
+	}
+}
+
+func (s *Seeder) execBatch(rows []seedRow) error {
+	if len(rows) == 1 {
+		return s.c.session.Query(insertProof, rows[0].key[:], rows[0].payload).ExecContext(s.ctx)
+	}
+	batch := s.c.session.Batch(gocql.UnloggedBatch)
+	for _, row := range rows {
+		batch.Query(insertProof, row.key[:], row.payload)
+	}
+	return batch.ExecContext(s.ctx)
+}
+
+func transientWriteError(err error) bool {
+	var timeout *gocql.RequestErrWriteTimeout
+	var unavailable *gocql.RequestErrUnavailable
+	var overloaded *gocql.RequestErrOverloaded
+	return errors.As(err, &timeout) || errors.As(err, &unavailable) ||
+		errors.As(err, &overloaded) || errors.Is(err, gocql.ErrTimeoutNoResponse)
 }
 
 // Put queues one record. The caller must not modify payload afterwards.

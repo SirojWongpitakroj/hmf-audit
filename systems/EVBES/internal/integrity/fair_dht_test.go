@@ -333,10 +333,10 @@ func newFairEVBESDHTSeeder(ctx context.Context,
 
 	seeder := &fairEVBESDHTSeeder{
 		ctx: ctx, dht: dht,
-		batches: make(chan []fairEVBESDHTEntry, dht.maxConcurrency),
+		batches: make(chan []fairEVBESDHTEntry, fairEVBESSeedWriters),
 	}
-	seeder.wait.Add(dht.maxConcurrency)
-	for range dht.maxConcurrency {
+	seeder.wait.Add(fairEVBESSeedWriters)
+	for range fairEVBESSeedWriters {
 		go func() {
 			defer seeder.wait.Done()
 			for entries := range seeder.batches {
@@ -359,13 +359,19 @@ func (seeder *fairEVBESDHTSeeder) Submit(entries []fairEVBESDHTEntry) error {
 	if err := seeder.Err(); err != nil {
 		return err
 	}
-	batch := append([]fairEVBESDHTEntry(nil), entries...)
-	select {
-	case seeder.batches <- batch:
-		return nil
-	case <-seeder.ctx.Done():
-		return seeder.ctx.Err()
+	// The caller may hand over many records at once (the PostgreSQL flush is
+	// larger than one Cassandra batch), so split them into batches of at most
+	// fairEVBESDHTBatchRows.
+	for start := 0; start < len(entries); start += fairEVBESDHTBatchRows {
+		end := min(start+fairEVBESDHTBatchRows, len(entries))
+		batch := append([]fairEVBESDHTEntry(nil), entries[start:end]...)
+		select {
+		case seeder.batches <- batch:
+		case <-seeder.ctx.Done():
+			return seeder.ctx.Err()
+		}
 	}
+	return nil
 }
 
 func (seeder *fairEVBESDHTSeeder) Close() error {
