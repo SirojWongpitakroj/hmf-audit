@@ -42,7 +42,11 @@ another scheme's keyspace or schema.
 2. **Data disks.** Attach a persistent SSD to each database VM and mount it at
    `/var/lib/fair-data`. Sizes (linear estimates from the local 500k measurement,
    plus WAL/compaction room): VM 5 ≥ 60 GB (HMF 2.5 + EVSEB 5.4 + DHT 8.4 GB),
-   VM 4 ≥ 20 GB, VMs 1–3 ≥ 20 GB. The runner needs ≈ 40 GB (dataset 25 GB + results).
+   VM 4 ≥ 20 GB, VMs 1–3 ≥ 20 GB. The runner needs ≈ 10 GB: the 10M file is 3.44 GB, the 100k file 0.03 GB, the Go toolchain and
+   build cache about 2 GB, plus results. The ≈ 24 GB of database content lives on the database
+   VMs, not on the runner. Canonicalization is not a stored stage: each fixture streams the
+   JSONL through canonicalization straight into its databases. (The git-ignored dataset files
+   are not in the clone; copy them to the runner, see below.)
 3. **`cloud.env`.** Set `CLOUD_PG_PASSWORD` in `systems/cloud/cloud.env` (letters and
    digits only; currently `admin`, which is acceptable only because port 5432 is
    reachable from the runner alone) and copy the file to every VM at the same path
