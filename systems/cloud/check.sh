@@ -84,7 +84,12 @@ if [[ "$mode" == pre ]]; then
     if grep -q '"0x7a69"' <<<"$chain"; then ok "anchor node $anchor answers (chain id 31337)"; else bad "anchor node $anchor does not answer as chain 31337: $chain"; fi
 else
     echo "cloud post-ingest verification" >&2
+    # Only the schemes that were actually seeded are checked (the default pipeline
+    # leaves out dht-backed, so its store is legitimately empty).
+    seeded=",${2:-hmf-audit,dht-backed,blas,evseb},"
+    echo "  checking: ${seeded//,/ }" >&2
     # --- HMF-Audit: four regions, logically separate partitions in ONE keyspace.
+    if [[ "$seeded" == *,hmf-audit,* ]]; then
     rows="$(cloud_cql "$CLOUD_HMF_CASSANDRA_HOST" -e 'SELECT DISTINCT region_id, shard_id FROM hmf_audit.hmf_segments_by_shard' 2>/dev/null \
         | awk -F'|' 'NF == 2 && $1 !~ /region_id/ { gsub(/ /, "", $1); gsub(/ /, "", $2); print $1 " " $2 }' | sort)"
     expected_rows=$((REGIONS * SHARDS_PER_REGION))
@@ -96,11 +101,13 @@ else
     else
         bad "HMF-Audit Cassandra: expected regions ${wanted_regions}x $SHARDS_PER_REGION shard(s) = $expected_rows partitions, found $found_rows (${found_regions})"
     fi
+    fi
     # --- EVSEB and DHT-backed: every routing row present, so lookups pay the routing reads.
     expected_routing=$((PEERS * LEVELS))
-    for pair in "evseb|$CLOUD_EVSEB_CASSANDRA_HOST|evseb.routing_table|SELECT lid_hash FROM evseb.dht_entries LIMIT 1" \
-        "dhtbacked|$CLOUD_DHT_CASSANDRA_HOST|dhtbacked.routing_table|SELECT proof_key FROM dhtbacked.proof_entries LIMIT 1"; do
-        IFS='|' read -r label host table probe <<<"$pair"
+    for pair in "evseb|$CLOUD_EVSEB_CASSANDRA_HOST|evseb.routing_table|SELECT lid_hash FROM evseb.dht_entries LIMIT 1|evseb" \
+        "dhtbacked|$CLOUD_DHT_CASSANDRA_HOST|dhtbacked.routing_table|SELECT proof_key FROM dhtbacked.proof_entries LIMIT 1|dht-backed"; do
+        IFS='|' read -r label host table probe system <<<"$pair"
+        [[ "$seeded" == *,"$system",* ]] || continue
         have="$(cql_count "$host" "SELECT COUNT(*) FROM $table")"
         if [[ "$have" == "$expected_routing" ]]; then
             ok "$table holds $have routing rows ($PEERS nodes x $LEVELS levels)"

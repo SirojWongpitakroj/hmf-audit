@@ -80,6 +80,6 @@ for system in "${selected[@]}"; do
 done
 if [[ "$CLOUD" == 1 ]]; then
     # HMF regions stay separate partitions; EVSEB and DHT-backed routing rows are present.
-    bash "$SYSTEMS_DIR/cloud/check.sh" post || die "cloud post-ingest verification failed; see above"
+    bash "$SYSTEMS_DIR/cloud/check.sh" post "$ingest_systems" || die "cloud post-ingest verification failed; see above"
 fi
 note "ingestion of $records records finished in $(( $(date +%s) - started )) s; logs in $RESULTS"
