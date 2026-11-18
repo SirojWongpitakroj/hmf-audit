@@ -109,8 +109,10 @@ def write_environment(args: argparse.Namespace) -> None:
         "dht_stride=8",
         "dht_window=1024",
         "dht_backed_concurrency=8",
-        "dht_backed_peers=1",
+        f"dht_backed_peers={args.dht_peers}",
+        f"dht_routing_reads_per_lookup={max(0, (args.dht_peers - 1).bit_length())}",
         "evseb_dht_concurrency=8",
+        f"evseb_dht_peers={args.dht_peers}",
         "evseb_merkle_arity=4",
         "blas_num_generators=1",
         "blas_entries_per_file=128",
@@ -122,9 +124,11 @@ def write_environment(args: argparse.Namespace) -> None:
         "timer_boundary=request arrival through final verification result",
         "timing_machinery=testing.B for every series",
         "postgres_image=postgres:17",
-        "postgres_endpoint=127.0.0.1:55432/fair_benchmark",
+        f"postgres_endpoint={args.postgres_endpoint}",
         "cassandra_image=cassandra:5.0.9",
-        "cassandra_endpoint=127.0.0.1:19042",
+        f"cassandra_endpoint={args.cassandra_endpoint}",
+        f"deployment={args.deployment}",
+        f"anchor_endpoint={args.anchor_endpoint}",
         "blockchain_network_in_primary_timers=false",
         f"systems_run={args.systems}",
     ]
@@ -336,6 +340,11 @@ def main() -> None:
         env.add_argument(name, type=int, required=True)
     env.add_argument("--shards-per-region", type=int, default=1)
     env.add_argument("--segment-leaves", type=int, default=8192)
+    env.add_argument("--dht-peers", type=int, default=16)
+    env.add_argument("--deployment", default="local Docker (systems/fair-persistence)")
+    env.add_argument("--postgres-endpoint", default="127.0.0.1:55432/fair_benchmark")
+    env.add_argument("--cassandra-endpoint", default="127.0.0.1:19042")
+    env.add_argument("--anchor-endpoint", default="none (in-memory chains)")
     env.set_defaults(handler=write_environment)
 
     for name, handler in (("exp1", run_exp1), ("exp2", run_exp2), ("exp3", run_exp3)):

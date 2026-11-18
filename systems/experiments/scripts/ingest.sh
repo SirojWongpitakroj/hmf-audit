@@ -67,12 +67,7 @@ done
 
 # Report what is actually in the database, and fail if it does not match.
 note "row counts in PostgreSQL"
-counts="$(compose exec -T postgres psql -q -At -F ' ' -U fair -d fair_benchmark -c "
-SELECT table_schema || '.' || table_name,
-       (xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', table_schema, table_name), false, true, '')))[1]::text
-FROM information_schema.tables
-WHERE table_schema IN ('hmf','evseb','dht','blas') AND table_type = 'BASE TABLE'
-ORDER BY 1;")"
+counts="$(pg_row_counts)"
 echo "$counts" | tee "$RESULTS/row_counts.txt" >&2
 for system in "${selected[@]}"; do
     case "$system" in
@@ -83,4 +78,8 @@ for system in "${selected[@]}"; do
     found="$(echo "$counts" | awk -v t="$table" '$1 == t {print $2}')"
     [[ "$found" == "$records" ]] || die "$table has '${found:-no rows}' rows, expected $records"
 done
+if [[ "$CLOUD" == 1 ]]; then
+    # HMF regions stay separate partitions; EVSEB and DHT-backed routing rows are present.
+    bash "$SYSTEMS_DIR/cloud/check.sh" post || die "cloud post-ingest verification failed; see above"
+fi
 note "ingestion of $records records finished in $(( $(date +%s) - started )) s; logs in $RESULTS"

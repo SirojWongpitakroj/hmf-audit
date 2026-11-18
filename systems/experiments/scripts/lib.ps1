@@ -6,6 +6,10 @@
 
 Set-StrictMode -Version Latest
 
+# Cloud mode (separate database VMs) is implemented for the bash scripts, which is
+# what the Linux runner uses. Fail clearly rather than silently run against Docker.
+if ($env:FAIR_CLOUD -eq "1") { throw "FAIR_CLOUD=1 is supported by the bash scripts only (systems/cloud/README.md)" }
+
 $script:ScriptsDir = $PSScriptRoot
 $script:ExpDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path   # systems\experiments: results\, datasets\, postprocess.py, *.sql
 $script:SystemsDir = (Resolve-Path (Join-Path $script:ExpDir "..")).Path
@@ -18,7 +22,7 @@ $script:SegmentLeaves = 8192
 $script:HppConcurrency = 8
 $script:EvsebDhtConcurrency = 8
 $script:DhtConcurrency = 8
-$script:DhtPeers = 1
+$script:DhtPeers = 16
 $script:DefaultPerRegion = 2500000
 # SHA-256 of the existing 10,000,000-record subset used by the earlier results.
 $script:Expected10mSha256 = "a8fa53db3327ce5b21cc61b249276817d81b2ee29a6facf64f48619d215dba82"

@@ -15,7 +15,7 @@ begin_experiment exp3_ablation "$@"
 write_environment exp3_ablation "hmf-audit" "$RESULTS"
 note "ablation: $WARMUP warm-up + $COUNT measured rounds per variant (q = 256, 1024, 4096, 16384)"
 set +e
-(cd "$SYSTEMS_DIR/hmf-audit" && FAIR_ABLATION=1 FAIR_ABLATION_OUTPUT_DIR="$(winpath "$RESULTS")" \
+(apply_endpoints hmf-audit; cd "$SYSTEMS_DIR/hmf-audit" && FAIR_ABLATION=1 FAIR_ABLATION_OUTPUT_DIR="$(winpath "$RESULTS")" \
     FAIR_ABLATION_WARMUP="$WARMUP" FAIR_ABLATION_MEASURED="$COUNT" \
     go test ./benchmarks/latency -run '^TestFairHMFAblation$' -v -count 1 -timeout 0) 2>&1 | tee "$RESULTS/ablation_run.log"
 status=${PIPESTATUS[0]}

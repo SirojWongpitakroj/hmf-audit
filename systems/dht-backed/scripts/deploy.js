@@ -7,7 +7,9 @@ const { ethers } = require("ethers");
 
 async function main() {
   const artifact = await hre.artifacts.readArtifact("EpochAnchor");
-  const provider = new ethers.JsonRpcProvider("http://127.0.0.1:8545");
+  // DHT_ETH_RPC_URL points the deployment at a remote node (the cloud anchor VM
+  // runs it against its own loopback); the default is the local Hardhat node.
+  const provider = new ethers.JsonRpcProvider(process.env.DHT_ETH_RPC_URL || "http://127.0.0.1:8545");
   const network = await provider.getNetwork();
   if (network.chainId !== 31337n) {
     throw new Error("expected chain id 31337, got " + network.chainId);

@@ -29,7 +29,7 @@ SEGMENT_LEAVES=8192
 HPP_CONCURRENCY=8
 EVSEB_DHT_CONCURRENCY=8
 DHT_CONCURRENCY=8
-DHT_PEERS=1
+DHT_PEERS=16
 DEFAULT_PER_REGION=2500000
 # SHA-256 of the existing 10,000,000-record subset used by the earlier results.
 EXPECTED_10M_SHA256=a8fa53db3327ce5b21cc61b249276817d81b2ee29a6facf64f48619d215dba82
@@ -47,6 +47,15 @@ DATASET=""
 OUTPUT=""
 SYSTEMS="hmf-audit,dht-backed,blas,evseb"
 COMPARE_PREVIOUS=1
+
+# Cloud mode (FAIR_CLOUD=1): the databases are the separate VMs described in
+# systems/cloud/README.md instead of the local Docker stack. The protocol above
+# is unchanged; only where each scheme's process connects differs.
+CLOUD="${FAIR_CLOUD:-0}"
+apply_endpoints() { :; }   # local Docker: every scheme uses the endpoints exported by export_fair_env
+if [[ "$CLOUD" == 1 ]]; then
+    . "$SYSTEMS_DIR/cloud/cloud-lib.sh"
+fi
 
 usage_common() {
     cat >&2 <<EOF
@@ -149,6 +158,13 @@ compose() { docker compose -f "$(winpath "$SYSTEMS_DIR/fair-persistence/docker-c
 # schema and keyspace the four schemes need. Idempotent.
 start_services() {
     if [[ "${FAIR_SERVICES_READY:-}" == 1 ]]; then return; fi
+    if [[ "$CLOUD" == 1 ]]; then
+        # The database VMs are provisioned once (systems/cloud/provision); here
+        # we only verify them, and fail before a day-long run rather than during it.
+        bash "$SYSTEMS_DIR/cloud/check.sh" pre || die "cloud preflight failed; see above"
+        export FAIR_SERVICES_READY=1
+        return
+    fi
     note "starting the local PostgreSQL and Cassandra containers"
     compose up -d --wait postgres cassandra
     compose exec -T postgres psql -v ON_ERROR_STOP=1 -q -U fair -d fair_benchmark \
@@ -174,15 +190,48 @@ export_fair_env() {
     export FAIR_REGION0_RECORDS="$PER_REGION" FAIR_REGION1_RECORDS="$PER_REGION"
     export FAIR_EVSEB_DHT_CONCURRENCY="$EVSEB_DHT_CONCURRENCY" FAIR_DHT_CONCURRENCY="$DHT_CONCURRENCY"
     export FAIR_DHT_PEERS="$DHT_PEERS"
+    # In the cloud each scheme's process gets its own endpoints (apply_endpoints),
+    # so none of the local ones may leak through.
+    if [[ "$CLOUD" == 1 ]]; then
+        unset FAIR_POSTGRES_DSN FAIR_DHT_POSTGRES_DSN FAIR_CASSANDRA_HOST FAIR_CASSANDRA_PORT
+    fi
 }
 
 # write_environment <experiment> <systems> <output dir>
 write_environment() {
+    local deployment=()
+    if [[ "$CLOUD" == 1 ]]; then
+        deployment=(--deployment "$(cloud_description)"
+            --postgres-endpoint "hmf+evseb+dht=$CLOUD_SHARED_PG_HOST:$CLOUD_PG_PORT blas=$CLOUD_BLAS_PG_HOST:$CLOUD_PG_PORT/$CLOUD_PG_DB"
+            --cassandra-endpoint "hmf_audit=$CLOUD_HMF_CASSANDRA_HOST:$CLOUD_CASSANDRA_PORT evseb=$CLOUD_EVSEB_CASSANDRA_HOST:$CLOUD_CASSANDRA_PORT dhtbacked=$CLOUD_DHT_CASSANDRA_HOST:$CLOUD_CASSANDRA_PORT"
+            --anchor-endpoint "$CLOUD_ANCHOR_HOST:$CLOUD_ANCHOR_PORT")
+    fi
     "$PYTHON" "$POSTPROCESS" env --out "$(winpath "$3")" --experiment "$1" --systems "$2" \
         --dataset "$(winpath "$DATASET")" --dataset-sha256 "$DATASET_SHA256" \
         --source-dataset "$(winpath "$SOURCE_DATASET")" --per-region "$PER_REGION" --regions "$REGIONS" \
         --count "$COUNT" --warmup "$WARMUP" --bench-time "$BENCHTIME" \
-        --shards-per-region "$SHARDS_PER_REGION" --segment-leaves "$SEGMENT_LEAVES"
+        --shards-per-region "$SHARDS_PER_REGION" --segment-leaves "$SEGMENT_LEAVES" \
+        --dht-peers "$DHT_PEERS" ${deployment[@]+"${deployment[@]}"}
+}
+
+# row_count_sql <quoted, comma-separated schema list>
+row_count_sql() {
+    cat <<EOF
+SELECT table_schema || '.' || table_name,
+       (xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', table_schema, table_name), false, true, '')))[1]::text
+FROM information_schema.tables
+WHERE table_schema IN ($1) AND table_type = 'BASE TABLE'
+ORDER BY 1;
+EOF
+}
+
+# pg_row_counts: "schema.table count" for every scheme's tables (local Docker or the cloud VMs).
+pg_row_counts() {
+    if [[ "$CLOUD" == 1 ]]; then
+        cloud_row_counts
+    else
+        compose exec -T postgres psql -q -At -F ' ' -U fair -d fair_benchmark -c "$(row_count_sql "'hmf','evseb','dht','blas'")"
+    fi
 }
 
 # run_benchmark <module dir> <package> <benchmark regexp> <result file>
@@ -190,7 +239,7 @@ run_benchmark() {
     local dir="$1" package="$2" pattern="$3" result="$4" status
     note "benchmark $pattern ($dir): count $COUNT, window $BENCHTIME, warm-up $WARMUP, GOMAXPROCS=1"
     set +e
-    (cd "$SYSTEMS_DIR/$dir" && go test -run '^$' -bench "$pattern" -benchmem -count "$COUNT" \
+    (apply_endpoints "$dir"; cd "$SYSTEMS_DIR/$dir" && go test -run '^$' -bench "$pattern" -benchmem -count "$COUNT" \
         -benchtime "$BENCHTIME" -cpu 1 -timeout 0 "$package") 2>&1 | tee "$result"
     status=${PIPESTATUS[0]}
     set -e

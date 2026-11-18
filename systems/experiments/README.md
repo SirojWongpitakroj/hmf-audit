@@ -47,7 +47,7 @@ dataset SHA-256 and Docker first, so a missing dependency fails before the long
 run rather than at the figures. Experiment 1 defaults to `hmf-audit,blas,evseb`
 (see "Known limitations"); override with `--systems` / `-Systems`. The three
 figures are copied to `results/spark-10000000/figures/` and the whole run is
-logged to `results/pipeline-10m-<timestamp>.log`. Other options: count, warmup,
+logged to `results/pipeline-<records>-<timestamp>.log`. Other options: count, warmup,
 bench-time, no-compare.
 
 Options (same meaning in both): count, warmup, bench-time, per-region, dataset,
@@ -72,13 +72,21 @@ Requirements: Go 1.27, Docker with Compose, Python 3.9+ with `matplotlib`
 * **Settings.** 4 regions × 1 shard, 8,192-leaf segments, concurrency 8,
   `GOMAXPROCS=1`, `-cpu 1`, 30 repetitions, 5 warm-ups, 250 ms window, nearest-rank
   percentiles, BLAS 1 generator / 128 entries per file / 8 files per block,
-  DHT-backed one epoch, stride 8, window 1024, 1 peer.
+  DHT-backed one epoch, stride 8, window 1024, 16 logical DHT nodes for both
+  DHT-backed and EVSEB (4 real Cassandra routing reads per lookup).
 * **Record of the run.** Each experiment writes `environment.txt` with these
   settings, the dataset hash, and the git state.
 
 What is **not** deterministic: wall-clock latencies (they depend on the machine
 and what else is running), and the keys/IVs EVSEB and DHT-backed generate fresh
 for every fixture (these change stored bytes, never the workload or any counter).
+
+## Running on the cloud VMs
+
+The same scripts run against separate database VMs when `FAIR_CLOUD=1` (bash only);
+see [`../cloud/README.md`](../cloud/README.md) for the topology, provisioning and the
+`cloud/run-pipeline.sh` wrapper. Without `FAIR_CLOUD` nothing changes: the local
+Docker stack above is used and cannot be pointed at a remote database.
 
 ## Cost
 

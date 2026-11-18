@@ -66,3 +66,7 @@ node_modules/
 *.swp
 .DS_Store
 Thumbs.db
+
+# --- Cloud deployment secrets (database password) -------------------------
+/systems/cloud/cloud.env
+/systems/cloud/anchor-deploy.out
