@@ -10,7 +10,7 @@
 
 role="${1:-}"
 [[ "$role" == blas || "$role" == shared ]] || die "usage: postgres-vm.sh blas|shared"
-[[ "${CLOUD_PG_PASSWORD:-}" =~ ^[A-Za-z0-9]{12,}$ ]] || die "set CLOUD_PG_PASSWORD (12+ letters/digits) in $CLOUD_ENV_FILE"
+[[ "${CLOUD_PG_PASSWORD:-}" =~ ^[A-Za-z0-9]+$ ]] || die "set CLOUD_PG_PASSWORD (letters and digits only) in $CLOUD_ENV_FILE"
 
 ensure_docker
 ensure_data_dir postgres

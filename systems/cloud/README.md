@@ -43,9 +43,11 @@ another scheme's keyspace or schema.
    `/var/lib/fair-data`. Sizes (linear estimates from the local 500k measurement,
    plus WAL/compaction room): VM 5 ≥ 60 GB (HMF 2.5 + EVSEB 5.4 + DHT 8.4 GB),
    VM 4 ≥ 20 GB, VMs 1–3 ≥ 20 GB. The runner needs ≈ 40 GB (dataset 25 GB + results).
-3. **`cloud.env`.** Fill `CLOUD_PG_PASSWORD` in `systems/cloud/cloud.env`
-   (`openssl rand -hex 12`) and copy the file to every VM at the same path (it is
-   git-ignored; the IPs are already filled in).
+3. **`cloud.env`.** Set `CLOUD_PG_PASSWORD` in `systems/cloud/cloud.env` (letters and
+   digits only; currently `admin`, which is acceptable only because port 5432 is
+   reachable from the runner alone) and copy the file to every VM at the same path
+   (it is git-ignored; the IPs are already filled in). The password must be identical
+   on the PostgreSQL VMs and the runner.
 4. **Clone the repository on every VM** (`git clone --recurse-submodules …`), then run
    on each VM its own script from the repo root:
 

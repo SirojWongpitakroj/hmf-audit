@@ -31,8 +31,8 @@ cloud_validate() {
         [[ -n "${!name:-}" ]] || die "$name is not set in $CLOUD_ENV_FILE"
     done
     # The password is placed in a postgres:// URL, so it must not need escaping.
-    [[ "$CLOUD_PG_PASSWORD" =~ ^[A-Za-z0-9]{12,}$ ]] \
-        || die "CLOUD_PG_PASSWORD must be at least 12 letters/digits (it is used inside a URL)"
+    [[ "$CLOUD_PG_PASSWORD" =~ ^[A-Za-z0-9]+$ ]] \
+        || die "CLOUD_PG_PASSWORD must be letters and digits only (it is used inside a URL)"
     [[ "$CLOUD_HMF_CASSANDRA_HOST" != "$CLOUD_EVSEB_CASSANDRA_HOST" \
         && "$CLOUD_HMF_CASSANDRA_HOST" != "$CLOUD_DHT_CASSANDRA_HOST" \
         && "$CLOUD_EVSEB_CASSANDRA_HOST" != "$CLOUD_DHT_CASSANDRA_HOST" ]] \
