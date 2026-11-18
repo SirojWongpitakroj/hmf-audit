@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"time"
 
 	"dhtbacked/internal/cassandradht"
 	"dhtbacked/internal/peerdht"
@@ -60,8 +59,6 @@ type proofStats struct {
 	logicalNodes, routingHops                      int
 	routingIdentity                                string
 	logical                                        bool
-	peerRTT, peerDelay, observedPeerDelay          time.Duration
-	delayedHops                                    uint64
 }
 
 func (a *IncrementalDHT) snapshotProof(source verifier.ProofSource) (proofStats, error) {
@@ -81,7 +78,6 @@ func (a *IncrementalDHT) snapshotProof(source verifier.ProofSource) (proofStats,
 		r := client.Stats()
 		s = proofStats{lookups: uint64(r.Lookups), routes: uint64(r.RoutingReads), reads: uint64(r.ProofReads), bytes: r.ReturnedBytes, readBytes: r.ProofReadBytes, cacheBytes: r.CacheBytes, cacheEntries: r.CacheEntries, hits: r.CacheHits, misses: r.CacheMisses, logical: true}
 		s.owners = r.OwnerLookups
-		s.peerRTT, s.peerDelay, s.observedPeerDelay, s.delayedHops = client.PeerRTT(), r.PeerDelay, r.ObservedPeerDelay, r.DelayedHops
 		s.logicalNodes, s.routingHops, s.routingIdentity = client.Peers(), client.HopsPerLookup(), client.RoutingModelIdentity()
 	case *peerdht.Client:
 		if a.Options.Cassandra != nil {

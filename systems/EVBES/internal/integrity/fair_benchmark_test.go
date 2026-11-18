@@ -34,6 +34,11 @@ var (
 
 var fairEVBESPlacements = []string{"clustered-2", "scattered"}
 var fairEVBESRequestCounts = []int{1, 16, 64, 256, 1024, 4096, 16384}
+
+// fairEVBESDefaultDHTPeers is the modelled overlay size, the same 16 logical
+// nodes (4 routing hops per lookup) the DHT-backed system uses. FAIR_DHT_PEERS
+// overrides it for both systems; 1 turns routing off.
+const fairEVBESDefaultDHTPeers = 16
 var fairEVBESTamperCounts = []int{1, 2, 4, 8, 16, 32, 64, 128, 256}
 
 const fairEVBESFixedBatchSize = 1 << 14
@@ -164,6 +169,9 @@ func runFairEVBESCase(b *testing.B, ctx context.Context, database *pgx.Conn,
 	b.ReportMetric(float64(tamperedRecords), "tampered-records/op")
 	b.ReportMetric(3, "postgres-reads/op")
 	b.ReportMetric(float64(len(candidates)), "cassandra-dht-lookups/op")
+	b.ReportMetric(float64(len(candidates)*dht.hops), "dht-routing-reads/op")
+	b.ReportMetric(float64(dht.hops), "dht-hops-per-lookup/op")
+	b.ReportMetric(float64(dht.peers), "dht-peers/op")
 	b.ReportMetric(float64(dht.maxConcurrency), "dht-concurrency/op")
 	b.ReportMetric(1, "proof-generation/op")
 	b.ReportMetric(float64(warmup), "warmup-ops")
@@ -251,6 +259,7 @@ func sharedFairEVBES(b *testing.B) (*pgx.Conn, *fairEVBESCassandraDHT, *fairEVBE
 			os.Getenv("FAIR_CASSANDRA_HOST"),
 			os.Getenv("FAIR_CASSANDRA_PORT"),
 			fairEVBESPositiveSetting(b, "FAIR_EVSEB_DHT_CONCURRENCY", 8),
+			fairEVBESPositiveSetting(b, "FAIR_DHT_PEERS", fairEVBESDefaultDHTPeers),
 		)
 		if err != nil {
 			fairEVBESShared.err = err
@@ -259,6 +268,10 @@ func sharedFairEVBES(b *testing.B) (*pgx.Conn, *fairEVBESCassandraDHT, *fairEVBE
 		fairEVBESShared.dht = dht
 		if err := dht.Truncate(ctx); err != nil {
 			fairEVBESShared.err = fmt.Errorf("reset EVSEB Cassandra DHT: %w", err)
+			return
+		}
+		if err := dht.EnsureRoutes(ctx); err != nil {
+			fairEVBESShared.err = fmt.Errorf("seed EVSEB DHT routing table: %w", err)
 			return
 		}
 		if _, err := database.Exec(ctx, "TRUNCATE TABLE evseb.encrypted_logs, "+

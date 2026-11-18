@@ -124,10 +124,6 @@ func (a *IncrementalDHT) Audit(ctx context.Context, c contract.Consumer, request
 		metrics.DHTLogicalNodes = after.logicalNodes
 		metrics.DHTRoutingHopsPerLookup = after.routingHops
 		metrics.DHTRoutingModelIdentity = after.routingIdentity
-		metrics.DHTPeerRTT = after.peerRTT
-		metrics.DHTModeledPeerDelay = after.peerDelay - before.peerDelay
-		metrics.DHTObservedPeerDelay = after.observedPeerDelay - before.observedPeerDelay
-		metrics.DHTDelayedHops = after.delayedHops - before.delayedHops
 		metrics.LogicalRoutingSteps = after.routes - before.routes
 		metrics.CassandraRoutingReads = metrics.LogicalRoutingSteps
 		metrics.CassandraProofReads = after.reads - before.reads

@@ -133,8 +133,6 @@ type AuditMetrics struct {
 	DHTOwnerLookups                                                                                                []uint64
 	DHTLogicalNodes, DHTRoutingHopsPerLookup                                                                       int
 	DHTRoutingModelIdentity                                                                                        string
-	DHTPeerRTT, DHTModeledPeerDelay, DHTObservedPeerDelay                                                          time.Duration
-	DHTDelayedHops                                                                                                 uint64
 	AncestorGroups, AncestorPathRecomputations, AncestorReuseHits                                                  uint64
 	EndToEnd, QueryResolution, ProofConstruction, Retrieval, Verification                                          time.Duration
 	EvidenceBytes, BitmapBytes, ProofBytes                                                                         uint64

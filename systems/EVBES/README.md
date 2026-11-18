@@ -40,9 +40,12 @@ not specify its original corpus, and none is claimed here.
 
 The shared persistence-inclusive fair benchmark uses PostgreSQL for encrypted
 cloud logs and stored-tree authentication nodes, and Cassandra for the
-persistent `H(LID) -> hLID` mapping. Cassandra supplies hash-partitioned
-key-value persistence here; it is not presented as a Kademlia/IPFS DHT or as
-having O(log(peers)) overlay-routing cost.
+persistent `H(LID) -> hLID` mapping. Cassandra is not a Kademlia/IPFS DHT, so
+the overlay is modelled exactly as in `../dht-backed`: 16 logical nodes
+(`FAIR_DHT_PEERS`, default 16), where each lookup first does ceil(log2 n) = 4
+real reads of a persisted `routing_table` row in Cassandra and then reads the
+`hLID`. No latency is simulated; all cost is measured Cassandra time.
+`FAIR_DHT_PEERS=1` turns routing off for both systems.
 
 ## How the paper's inconsistencies are resolved
 

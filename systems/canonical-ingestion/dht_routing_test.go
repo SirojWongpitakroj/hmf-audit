@@ -3,7 +3,6 @@ package canonicalingestion
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestLogicalDHTRoutingPolicyAndAccounting(t *testing.T) {
@@ -37,36 +36,5 @@ func TestLogicalDHTRoutingPolicyAndAccounting(t *testing.T) {
 				t.Fatal("invalid model report accepted")
 			}
 		})
-	}
-}
-
-func TestLogicalPeerRTTAccounting(t *testing.T) {
-	m := AuditMetrics{DHTPeerRTT: DefaultDHTPeerRTT, LogicalRoutingSteps: 30, DHTDelayedHops: 30,
-		DHTModeledPeerDelay: 30 * DefaultDHTPeerRTT, DHTObservedPeerDelay: 30*DefaultDHTPeerRTT + time.Millisecond}
-	if err := ValidateLogicalDHTPeerRTT(m, DefaultDHTPeerRTT); err != nil {
-		t.Fatal(err)
-	}
-	for name, change := range map[string]func(*AuditMetrics){
-		"missing delay": func(m *AuditMetrics) { m.DHTPeerRTT = 0 },
-		"skipped hop":   func(m *AuditMetrics) { m.DHTDelayedHops-- },
-		"wrong sum":     func(m *AuditMetrics) { m.DHTModeledPeerDelay-- },
-		"short wait":    func(m *AuditMetrics) { m.DHTObservedPeerDelay = m.DHTModeledPeerDelay - 1 },
-		"overflow":      func(m *AuditMetrics) { m.DHTDelayedHops = 1 << 63; m.LogicalRoutingSteps = 1 << 63 },
-	} {
-		t.Run(name, func(t *testing.T) {
-			bad := m
-			change(&bad)
-			if ValidateLogicalDHTPeerRTT(bad, DefaultDHTPeerRTT) == nil {
-				t.Fatal("invalid delay report accepted")
-			}
-		})
-	}
-	if err := ValidateLogicalDHTPeerRTT(AuditMetrics{LogicalRoutingSteps: 30}, 0); err != nil {
-		t.Fatal(err)
-	}
-	for _, rtt := range []time.Duration{-1, time.Second + 1} {
-		if ValidateDHTPeerRTT(rtt) == nil {
-			t.Fatal("invalid RTT accepted")
-		}
 	}
 }

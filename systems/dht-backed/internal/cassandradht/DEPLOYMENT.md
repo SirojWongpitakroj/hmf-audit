@@ -6,13 +6,12 @@ stored in the shared PostgreSQL `baselines_db`**. The four private hosts in
 `deployment.json` are Cassandra contact points, not physical DHT peers.
 `internal/peerdht` remains an alternative/reference implementation.
 
-Experiment 1B overrides only the audit model to 1,024 logical nodes and adds a
-default **387 microsecond simulated RTT per logical hop**, including cache hits.
-The audit flag `-peer-rtt 387us` is additional to measured Cassandra latency;
-`-peer-rtt 0` disables simulation. Ingestion has no added delay. Requested and
-observed waits are reported separately because timers may overshoot. Native
-configuration hashes, routing identities and persisted proofs are unchanged.
-See [the audit routing policy](../../../DHT_LOGICAL_ROUTING.md).
+Experiment 1B overrides only the audit model to 1,024 logical nodes (10 routing
+hops per lookup, including cache hits). Every hop is a real, measured Cassandra
+read; **no network latency is simulated**. EVSEB's fair-benchmark DHT models the
+same logical-node model (16 nodes, 4 hops, by default in the fair benchmarks), so both systems pay identical routing
+cost. Native configuration hashes, routing identities and persisted proofs are
+unchanged.
 
 ## Configuration and storage ownership
 

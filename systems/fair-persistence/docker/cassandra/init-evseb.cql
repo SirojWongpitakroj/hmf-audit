@@ -21,3 +21,14 @@ CREATE TABLE IF NOT EXISTS dht_entries (
     lid_hash text PRIMARY KEY,
     h_lid    blob
 );
+
+-- Logical overlay routing, mirroring dhtbacked.routing_table. One row per
+-- (peer, level): the peer one bit-flip away at that level. The benchmark
+-- (re)seeds it for FAIR_DHT_PEERS logical nodes (default 16, so 4 levels);
+-- each lookup reads one row per level before reading dht_entries.
+CREATE TABLE IF NOT EXISTS routing_table (
+    peer      int,
+    level     int,
+    next_peer int,
+    PRIMARY KEY (peer, level)
+);

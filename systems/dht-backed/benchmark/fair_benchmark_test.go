@@ -25,8 +25,8 @@ var fairDHTFixtureErr error
 // request, reads the requested records from PostgreSQL in one query, reads
 // every proof record the batch needs from the Cassandra-backed DHT with a
 // bounded pool of concurrent lookups, and ends after trusted-anchor
-// verification. With FAIR_DHT_PEERS above 1 each lookup also pays
-// ceil(log2 peers) routing reads before its value read.
+// verification. Each lookup pays ceil(log2 peers) routing reads (10 at the
+// default 1,024 peers) before its value read.
 func BenchmarkFairDHTVerificationRequest(b *testing.B) {
 	b.StopTimer()
 	if os.Getenv("FAIR_PERSISTENCE") != "1" {
@@ -186,11 +186,11 @@ func fairDHTConcurrency(t testing.TB) int {
 }
 
 // fairDHTPeers is n, the number of peers in the modelled DHT; a lookup costs
-// ceil(log2 n) routing hops. It defaults to 1, which is no routing cost: like
-// EVSEB's Cassandra DHT, a lookup is one hash-partitioned partition-key read
-// and makes no O(log peers) claim. A larger n turns the routing model on.
+// ceil(log2 n) routing hops, each a real Cassandra read. It defaults to 16
+// logical nodes (4 hops), the same overlay EVSEB's Cassandra DHT models, and
+// nothing is simulated. FAIR_DHT_PEERS=1 turns routing off.
 func fairDHTPeers(t testing.TB) int {
-	return fairDHTPositiveSetting(t, "FAIR_DHT_PEERS", 1)
+	return fairDHTPositiveSetting(t, "FAIR_DHT_PEERS", 16)
 }
 
 func fairDHTSegmentLeaves(t testing.TB) int {

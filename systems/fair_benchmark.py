@@ -654,9 +654,9 @@ def build_workload_manifest(
                 "log_types": ["access", "api", "auth", "error", "security"],
                 "proof_store": "Cassandra dhtbacked.proof_entries",
                 "lookup_concurrency": int(os.environ.get("FAIR_DHT_CONCURRENCY", "8")),
-                "overlay_peers": int(os.environ.get("FAIR_DHT_PEERS", "1")),
+                "overlay_peers": int(os.environ.get("FAIR_DHT_PEERS", "16")),
                 "routing_hops_per_lookup": max(
-                    0, (int(os.environ.get("FAIR_DHT_PEERS", "1")) - 1).bit_length()
+                    0, (int(os.environ.get("FAIR_DHT_PEERS", "16")) - 1).bit_length()
                 ),
                 "fixture_aead_key": "32 zero bytes",
                 "signing_keys": (
@@ -675,6 +675,12 @@ def build_workload_manifest(
             },
             "EVSEB": {
                 "merkle_arity": 4,
+                "dht_store": "Cassandra evseb.dht_entries",
+                "lookup_concurrency": int(os.environ.get("FAIR_EVSEB_DHT_CONCURRENCY", "8")),
+                "overlay_peers": int(os.environ.get("FAIR_DHT_PEERS", "16")),
+                "routing_hops_per_lookup": max(
+                    0, (int(os.environ.get("FAIR_DHT_PEERS", "16")) - 1).bit_length()
+                ),
                 "cryptographic_randomness": (
                     "fresh OS-CSPRNG keys and IVs per fixture; "
                     "logical workload is unaffected"

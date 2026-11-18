@@ -4,38 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/bits"
-	"time"
 )
-
-const DefaultDHTPeerRTT = 387 * time.Microsecond
-
-// ValidateDHTPeerRTT bounds an audit-only simulation parameter.
-func ValidateDHTPeerRTT(rtt time.Duration) error {
-	if rtt < 0 || rtt > time.Second {
-		return fmt.Errorf("logical peer RTT must be between zero and one second")
-	}
-	return nil
-}
-
-// ValidateLogicalDHTPeerRTT rejects reports from another delay configuration
-// and checks that every logical hop, even on a proof-cache hit, was delayed.
-func ValidateLogicalDHTPeerRTT(m AuditMetrics, rtt time.Duration) error {
-	if err := ValidateDHTPeerRTT(rtt); err != nil {
-		return err
-	}
-	if m.DHTPeerRTT != rtt {
-		return fmt.Errorf("DHT report differs from configured simulated peer RTT")
-	}
-	expected := m.LogicalRoutingSteps
-	if rtt == 0 {
-		expected = 0
-	}
-	if m.DHTDelayedHops != expected || (rtt > 0 && expected > uint64((1<<63-1)/rtt)) ||
-		m.DHTModeledPeerDelay != time.Duration(expected)*rtt || m.DHTObservedPeerDelay < m.DHTModeledPeerDelay {
-		return fmt.Errorf("DHT simulated peer RTT accounting differs from logical hops")
-	}
-	return nil
-}
 
 // LogicalDHTHops validates the bounded XOR routing model. Node count is an
 // independent experiment parameter, never derived from observation count.

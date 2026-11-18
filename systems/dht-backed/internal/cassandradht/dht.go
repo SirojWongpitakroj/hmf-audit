@@ -6,9 +6,8 @@
 // Cassandra is not a peer-to-peer overlay, so the O(log n) cost of resolving a
 // key in a DHT of n peers is modelled explicitly: every lookup first walks
 // ceil(log2 n) routing hops, each a real read of a persisted routing-table row
-// in Cassandra, and only then reads the value at the responsible peer. Cassandra
-// time is measured; an optional, separately reported simulated peer RTT is added
-// at every logical hop by the audit runner.
+// in Cassandra, and only then reads the value at the responsible peer. All time
+// is measured Cassandra time; no network delay is simulated.
 //
 // A verification request hands the whole set of records it needs to GetMany,
 // which resolves them with a bounded pool of concurrent lookups.
@@ -62,9 +61,6 @@ type Config struct {
 	Peers int
 	// Concurrency bounds the lookups in flight during one GetMany.
 	Concurrency int
-	// PeerRTT is an additional simulated network round trip per logical hop.
-	// Zero disables simulation. It never replaces measured Cassandra latency.
-	PeerRTT time.Duration
 }
 
 // Stats counts the storage reads a DHT has served since the last ResetStats.
@@ -77,9 +73,7 @@ type Stats struct {
 	// RoutingReads is the number of routing-table reads: Lookups * Hops.
 	RoutingReads int64
 	// ProofReads counts storage value reads on cache misses, including failures.
-	ProofReads                   int64
-	DelayedHops                  uint64
-	PeerDelay, ObservedPeerDelay time.Duration
+	ProofReads int64
 }
 
 // DHT resolves proof records through the modelled overlay. It is safe for
@@ -96,9 +90,6 @@ type DHT struct {
 	peers                         int
 	hops                          int
 	workers                       int
-	peerRTT                       time.Duration
-	delayedHops                   atomic.Uint64
-	peerDelay, observedPeerDelay  atomic.Int64
 
 	lookups      atomic.Int64
 	routingReads atomic.Int64
@@ -140,9 +131,6 @@ func New(ctx context.Context, kv KV, caPublicKey ed25519.PublicKey, cfg Config) 
 	if cfg.Concurrency <= 0 {
 		return nil, fmt.Errorf("cassandradht: concurrency must be positive, got %d", cfg.Concurrency)
 	}
-	if cfg.PeerRTT < 0 || cfg.PeerRTT > time.Second {
-		return nil, errors.New("cassandradht: peer RTT must be between zero and one second")
-	}
 	l := DefaultLimits()
 	l.Workers = cfg.Concurrency
 	if cfg.Limits != nil {
@@ -166,7 +154,7 @@ func New(ctx context.Context, kv KV, caPublicKey ed25519.PublicKey, cfg Config) 
 		routingModelIdentity: cfg.RoutingModelIdentity,
 		limits:               l, cache: newBoundedCache(l), owners: make([]atomic.Uint64, cfg.Peers),
 		kv: kv, ctx: ctx, caPublicKey: caPublicKey,
-		peers: cfg.Peers, hops: Hops(cfg.Peers), workers: cfg.Concurrency, peerRTT: cfg.PeerRTT,
+		peers: cfg.Peers, hops: Hops(cfg.Peers), workers: cfg.Concurrency,
 	}, nil
 }
 
@@ -175,7 +163,6 @@ func (d *DHT) Peers() int                   { return d.peers }
 func (d *DHT) HopsPerLookup() int           { return d.hops }
 func (d *DHT) Concurrency() int             { return d.workers }
 func (d *DHT) RoutingModelIdentity() string { return d.routingModelIdentity }
-func (d *DHT) PeerRTT() time.Duration       { return d.peerRTT }
 
 // ClearAuditCache must be called between independent audits after workers join.
 // It drops proof payloads only, retaining counters and persisted routing rows.
@@ -193,9 +180,6 @@ func (d *DHT) ResetStats() {
 	d.lookups.Store(0)
 	d.routingReads.Store(0)
 	d.proofReads.Store(0)
-	d.delayedHops.Store(0)
-	d.peerDelay.Store(0)
-	d.observedPeerDelay.Store(0)
 	d.returnedBytes.Store(0)
 	d.proofReadBytes.Store(0)
 	for i := range d.owners {
@@ -210,13 +194,10 @@ func (d *DHT) ResetStats() {
 // Stats returns the read counters.
 func (d *DHT) Stats() Stats {
 	s := Stats{
-		OwnerLookups:      make([]uint64, len(d.owners)),
-		Lookups:           d.lookups.Load(),
-		RoutingReads:      d.routingReads.Load(),
-		ProofReads:        d.proofReads.Load(),
-		DelayedHops:       d.delayedHops.Load(),
-		PeerDelay:         time.Duration(d.peerDelay.Load()),
-		ObservedPeerDelay: time.Duration(d.observedPeerDelay.Load()),
+		OwnerLookups: make([]uint64, len(d.owners)),
+		Lookups:      d.lookups.Load(),
+		RoutingReads: d.routingReads.Load(),
+		ProofReads:   d.proofReads.Load(),
 	}
 	s.CacheBytes, s.CacheEntries, s.CacheHits, s.CacheMisses = d.cache.snapshot()
 	s.ReturnedBytes = d.returnedBytes.Load()
@@ -235,7 +216,7 @@ func (d *DHT) lookup(ctx context.Context, key hashing.Digest) ([]byte, error) {
 	target := PeerOf(key, d.peers)
 	cur := 0
 	for level := d.hops - 1; level >= 0; level-- {
-		if err := d.waitPeerRTT(ctx); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		next, err := d.kv.Route(ctx, cur, level)
@@ -271,34 +252,6 @@ func (d *DHT) lookup(ctx context.Context, key hashing.Digest) ([]byte, error) {
 	d.owners[target].Add(1)
 	d.returnedBytes.Add(uint64(len(value)))
 	return value, nil
-}
-
-// waitPeerRTT models one whole request/response RTT, not a delay in each
-// direction. Timers yield the worker; no busy-wait or global serialization.
-// Observed time is summed across workers and is not additive wall-clock time.
-func (d *DHT) waitPeerRTT(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if d.peerRTT == 0 {
-		return nil
-	}
-	started := time.Now()
-	timer := time.NewTimer(d.peerRTT)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		d.observedPeerDelay.Add(int64(time.Since(started)))
-		return ctx.Err()
-	case <-timer.C:
-		d.observedPeerDelay.Add(int64(time.Since(started)))
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		d.delayedHops.Add(1)
-		d.peerDelay.Add(int64(d.peerRTT))
-		return nil
-	}
 }
 
 // authorize is the Phase 5(a) gate: the token must verify under pk_CA for the

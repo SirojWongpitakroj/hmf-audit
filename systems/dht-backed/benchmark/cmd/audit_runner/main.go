@@ -27,15 +27,11 @@ func run() error {
 	keys := flag.String("key-dir", "./dht-live-keys", "persistent producer/encryption/CA directory")
 	proofConfig := flag.String("dht-config", "internal/cassandradht/deployment.json", "native proof-store Cassandra deployment JSON; preserve for existing datasets")
 	logicalNodes := flag.Int("logical-nodes", 1024, "fixed audit routing-model node count, independent of log count and physical Cassandra hosts")
-	peerRTT := flag.Duration("peer-rtt", contract.DefaultDHTPeerRTT, "additional simulated RTT per logical routing hop, on top of Cassandra latency (0 disables)")
 	setupWorkers := flag.Int("routing-setup-workers", 1, "bounded routing-metadata initialization workers (1-64), separate from measured audit I/O")
 	capacity := flag.Uint64("epoch-capacity", 1000, "unchanged native ingestion geometry")
 	expectRF := flag.Int("expect-replication-factor", 0, "refuse to audit unless the live proof keyspace has exactly this replication factor (0 skips the check)")
 	audit := contract.BindAuditFlags(flag.CommandLine)
 	flag.Parse()
-	if err := contract.ValidateDHTPeerRTT(*peerRTT); err != nil {
-		return err
-	}
 	if *setupWorkers < 1 || *setupWorkers > 64 {
 		return fmt.Errorf("routing-setup-workers must be between 1 and 64")
 	}
@@ -110,7 +106,6 @@ func run() error {
 		return err
 	}
 	auditLogical := logical
-	auditLogical.PeerRTT = *peerRTT
 	auditLogical.Peers = *logicalNodes
 	auditLogical.RoutingModelIdentity = hex.EncodeToString(modelIdentity[:])
 	a.AuditLogicalNodes = *logicalNodes
@@ -123,7 +118,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "DHT simulated peer RTT: %s/hop, %s/lookup requested in addition to Cassandra queries; timer overshoot reported separately\n", *peerRTT, time.Duration(routingHops)*(*peerRTT))
+	fmt.Fprintf(os.Stderr, "DHT routing: %d logical nodes, %d measured Cassandra routing reads per lookup; no simulated latency\n", *logicalNodes, routingHops)
 	ctx = contract.WithAuditCacheReset(ctx, client.ClearAuditCache)
 	report, err := contract.RunAudits(ctx, c, request, audit.Limits(), "DHT-backed", *audit.Warmups, *audit.Runs, *audit.Interval, func(ctx context.Context, r contract.AuditRequest) (contract.AuditMetrics, error) {
 		return a.Audit(ctx, c, r, client, *audit.MaxRecords)
@@ -138,12 +133,11 @@ func run() error {
 		ReadConsistency                                                                string
 		RoutingModelIdentity                                                           string
 		RoutingSetupMillis                                                             float64
-		SimulatedPeerRTT, ModeledPeerDelayPerLookup                                    time.Duration
-		Limits                                                                         cassandradht.Limits
+		Limits                                                                        cassandradht.Limits
 		CassandraHosts                                                                 []string
 		Database, ProofBackend                                                         string
-	}{*capacity, *logicalNodes, logical.Peers, routingHops, len(deployment.Hosts), *setupWorkers, replicationFactor, "LOCAL_QUORUM", a.AuditRoutingModelIdentity, setupMillis, *peerRTT, time.Duration(routingHops) * (*peerRTT), auditLimits, deployment.Hosts, "baselines_db", "Cassandra"})
-	report.Notes = append(report.Notes, fmt.Sprintf("Additional simulated peer RTT is %s per logical hop, calibrated from the supplied ICMP mean; this is not a measured peer-to-peer overlay RTT. Cassandra latency remains included, so this intentionally adds to existing network/storage cost. DHTObservedPeerDelay includes timer/scheduler overshoot and sums waits across workers; it is not additive wall-clock time.", *peerRTT))
+	}{*capacity, *logicalNodes, logical.Peers, routingHops, len(deployment.Hosts), *setupWorkers, replicationFactor, "LOCAL_QUORUM", a.AuditRoutingModelIdentity, setupMillis, auditLimits, deployment.Hosts, "baselines_db", "Cassandra"})
+	report.Notes = append(report.Notes, "No network latency is simulated: every routing hop is a real, measured Cassandra read.")
 	report.Notes = append(report.Notes, fmt.Sprintf("Fixed %d-node logical DHT routing model (%d routing operations per proof-key lookup) backed by %d configured Cassandra contact points; this is not a physical %d-node deployment or a reproduction of its network latency.", *logicalNodes, routingHops, len(deployment.Hosts), *logicalNodes), "Existing native ingestion/proof identity, stored records, keys, roots and payloads remain unchanged; audit routing has a separate durable identity.", "Every proof key follows deterministic modeled ownership and persisted logical routing before cache/storage lookup, including cache hits. Route setup/validation is outside timing; lookup routing reads are inside end-to-end.", "The same native ancestor-assisted verification, keys, roots and proof contents are retained. Evidence preparation and relational/Cassandra retrieval are inside end-to-end.", "RSS is the benchmark application process; Cassandra and PostgreSQL server RSS are separate. The bounded proof cache is emptied before and after every warmup and measured audit; only within-audit reuse is allowed.", "Storage byte counters include successful decoded mapping, record, aggregate, anchor and Cassandra proof/routing payloads; protocol framing is excluded.", "The root anchor remains the existing PostgreSQL append-only ledger emulator, not an independently operated blockchain.")
 	return audit.Finish(report)
 }
