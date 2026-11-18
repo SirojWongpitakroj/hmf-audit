@@ -22,8 +22,17 @@ Cassandra `127.0.0.1:19042`). The commands refuse any non-local host.
 .\query.ps1 -Tenant T745 -Service spark-executor -LogType UNSPECIFIED -Region R1 -At 2015-09-01T18:14:40Z
 ```
 
-All five attributes are required (a time is a point `-At`, or a range `-Start`/`-End`;
-the range is half-open: `start` included, `end` excluded). Other options:
+Service, log type, region and a time are required (a time is a point `-At`, or a range
+`-Start`/`-End`; the range is half-open: `start` included, `end` excluded). **Tenant is
+optional.** Leave it out and one query returns the logs of **every tenant** in that
+service, log type, region and time range, resolved and proven by a single range proof:
+
+```bash
+./query.sh --service spark-executor --log-type INFO --region R0 \
+           --start 2015-09-01T18:00:00Z --end 2015-09-01T19:00:00Z
+```
+
+Give `--tenant` to narrow the same verified range to one tenant. Other options:
 `--limit N` rows printed (default 20; the summary counts all), `--json` for one
 JSON line per log. Exit code: 0 all VALID, 1 at least one REJECTED, 2 error.
 
@@ -62,7 +71,11 @@ the locator entry, or it is missing from the database.
 
 ## Limits
 
-* Queries are exact matches on tenant, service, log type and region plus a time
+* The locator key order is service, log type, region, event time, tenant, log ID
+  (`internal/all/locator_key.go`), so a query on service, log type, region and a time
+  range is one continuous range over all tenants. A locator built with the earlier
+  tenant-first order is not readable by this code: re-ingest after upgrading.
+* Queries are exact matches on service, log type and region (tenant optional) plus a time
   range; there are no wildcards or partial queries. This is how the locator is
   keyed (`internal/all/locator_key.go`).
 * The ingest is one pass and expects an empty database (`--reset` empties this
