@@ -48,4 +48,18 @@ note "applying $(basename "$schema")"
 sudo docker exec -i fair-cassandra cqlsh "$ip" <"$schema"
 sudo docker exec fair-cassandra cqlsh "$ip" -e "DESCRIBE KEYSPACE $keyspace" >/dev/null \
     || die "keyspace $keyspace was not created"
+
+# EVSEB and DHT-backed model a 16-node DHT: every lookup first does ceil(log2 n)
+# real reads of routing_table, which the benchmark seeds when it starts. Make
+# sure the table exists even if the schema file on this VM predates it. This is
+# the same definition as in the schema files, and it is idempotent.
+case "$role" in
+evseb | dht)
+    note "ensuring $keyspace.routing_table"
+    sudo docker exec fair-cassandra cqlsh "$ip" -e \
+        "CREATE TABLE IF NOT EXISTS $keyspace.routing_table (peer int, level int, next_peer int, PRIMARY KEY (peer, level));"
+    sudo docker exec fair-cassandra cqlsh "$ip" -e "DESCRIBE TABLE $keyspace.routing_table" >/dev/null \
+        || die "$keyspace.routing_table is missing: DHT routing would be skipped"
+    ;;
+esac
 note "done: keyspace $keyspace ready on $ip:9042. Allow port 9042 only from the runner (10.148.0.8)."

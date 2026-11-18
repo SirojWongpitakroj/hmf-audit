@@ -65,6 +65,22 @@ another scheme's keyspace or schema.
    keeps its state in memory: after the anchor VM has been stopped and started, run
    `bash systems/cloud/provision/anchor-vm.sh --deploy-only` to redeploy `EpochAnchor`.
 
+## After a `git pull` on a database VM
+
+The provisioning scripts are safe to repeat: they keep the data and only add what is
+missing. On the EVSEB and DHT-backed Cassandra VMs they also make sure
+`routing_table` exists (the table behind the 4 real routing reads per lookup). So after
+pulling, just run that VM's script again:
+
+```bash
+cd ~/hmf-audit && git pull
+bash systems/cloud/provision/cassandra-vm.sh evseb    # evseb VM
+bash systems/cloud/provision/cassandra-vm.sh dht      # dhtbacked VM
+```
+
+The benchmark itself fills `routing_table` (16 nodes x 4 levels = 64 rows) when it
+starts; `check.sh post` verifies the rows after seeding.
+
 ## Every session
 
 Start the VMs (databases and anchor first), SSH into the runner, then:
