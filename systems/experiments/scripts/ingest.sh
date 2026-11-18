@@ -7,13 +7,15 @@
 #   ingest.sh --records 10000000      the existing 10M file (SHA-256 checked)
 #   ingest.sh --records N --systems hmf-audit,evseb     (subset of the four schemes)
 #   ingest.sh --records N --parallel                    (ingest the schemes at the same time)
+#   ingest.sh --records N --max-parallel 2              (at most 2 at a time; implies --parallel)
 #
-# --parallel starts every scheme's ingest as its own process at once. Each one
-# reads the same dataset file (read-only) and writes only its own keyspace or
-# schema, so the data is the same as in the sequential run. It only changes how
-# long you wait: in the cloud the schemes sit on different VMs, but the runner's
-# CPU and memory and the shared PostgreSQL VM (hmf, evseb and dht schemas) are
-# shared, so the speed-up is bounded by those. Nothing is timed during ingest.
+# --parallel starts the schemes' ingests as separate processes. Each one reads
+# the same dataset file (read-only) and writes only its own keyspace or schema,
+# so the data is the same as in the sequential run; only the waiting changes.
+# It is guarded (scripts/parallel.sh): never more jobs than CPUs, a memory
+# budget before a job starts, a watchdog that stops the newest job if the
+# machine runs low on memory (it then reruns alone), and lower priority so SSH
+# stays responsive. Nothing is timed during ingest.
 #
 # Ingestion reuses the unchanged fair fixtures: each scheme's fixture seeds the
 # database when its benchmark process starts, so this runs one minimal
@@ -23,6 +25,7 @@
 # loading and inspecting the data, not a prerequisite of the experiments.
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/parallel.sh"
 
 ALLOWED_RECORDS=(100000 10000000)
 records=""
@@ -34,8 +37,10 @@ while [[ $# -gt 0 ]]; do
     --records=*) records="${1#--records=}"; shift ;;
     --systems) [[ $# -ge 2 ]] || die "--systems needs a value"; ingest_systems="$2"; shift 2 ;;
     --parallel) parallel=1; shift ;;
+    --max-parallel) [[ $# -ge 2 ]] || die "--max-parallel needs a value"; parallel=1; INGEST_MAX_PARALLEL="$2"; shift 2 ;;
+    --max-parallel=*) parallel=1; INGEST_MAX_PARALLEL="${1#--max-parallel=}"; shift ;;
     -h | --help)
-        echo "usage: ingest.sh --records 100000|10000000 [--systems hmf-audit,dht-backed,blas,evseb] [--parallel]" >&2
+        echo "usage: ingest.sh --records 100000|10000000 [--systems hmf-audit,dht-backed,blas,evseb] [--parallel] [--max-parallel N]" >&2
         exit 0 ;;
     *) die "unknown option $1 (usage: ingest.sh --records 100000|10000000)" ;;
     esac
@@ -70,26 +75,20 @@ begin_experiment ingest --per-region $((records / REGIONS)) --count 1 --warmup 0
 write_environment ingest "$ingest_systems" "$RESULTS"
 
 started=$(date +%s)
+ingest_one() { run_benchmark "${MODULE[$1]}" "${PACKAGE[$1]}" "${PATTERN[$1]}" "$RESULTS/$1.txt"; }
+
 if [[ "$parallel" == 1 && ${#selected[@]} -gt 1 ]]; then
-    # One background job per scheme; each job's output also goes to its own
-    # $RESULTS/<system>.txt. A failed job does not stop the others, but the
-    # script fails after all of them have finished.
-    note "ingesting ${#selected[@]} schemes in parallel ($records records each)"
-    pids=()
-    for system in "${selected[@]}"; do
-        note "ingesting $system ($records records)"
-        run_benchmark "${MODULE[$system]}" "${PACKAGE[$system]}" "${PATTERN[$system]}" "$RESULTS/$system.txt" &
-        pids+=("$!")
+    # Heaviest first, so the long job does not start last.
+    queue=()
+    for system in hmf-audit evseb dht-backed blas; do
+        for chosen in "${selected[@]}"; do [[ "$chosen" == "$system" ]] && queue+=("$system"); done
     done
-    failed=()
-    for index in "${!pids[@]}"; do
-        wait "${pids[$index]}" || failed+=("${selected[$index]}")
-    done
-    [[ ${#failed[@]} -eq 0 ]] || die "ingest failed for: ${failed[*]}; see $RESULTS/<system>.txt"
+    PAR_LOG_DIR="$RESULTS"
+    parallel_ingest "$records" "${queue[@]}" || die "ingest failed for: ${PAR_FAILED[*]}; see $RESULTS/<system>.log and <system>.txt"
 else
     for system in "${selected[@]}"; do
         note "ingesting $system ($records records)"
-        run_benchmark "${MODULE[$system]}" "${PACKAGE[$system]}" "${PATTERN[$system]}" "$RESULTS/$system.txt"
+        ingest_one "$system"
     done
 fi
 

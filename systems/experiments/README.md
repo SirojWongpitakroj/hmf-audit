@@ -130,6 +130,19 @@ routing reads, no proof cache) is unchanged, and the stored rows are the same.
   `FAIR_HMF_SEED_CONCURRENCY=N` overrides it.
 * **BLAS.** Only the GOMAXPROCS change; its load is one streaming `COPY`.
 
+**Parallel ingest (opt-in).** `scripts/ingest.sh --records N --parallel` ingests the
+schemes at the same time; `--max-parallel K` limits it to K at once. Guards in
+`scripts/parallel.sh`: never more jobs than CPUs; each job gets an equal share of the CPUs
+for its setup threads and a lower priority; a job starts only if the memory budget
+(RAM minus a reserve of 10%, at least 1 GiB) covers the estimated peak of every running job plus
+the new one; and, on Linux, if available memory falls below the floor the newest job
+is stopped and run again alone (the last running job is never stopped). Per-job logs are
+`results/.../ingest/<system>.log`. The 10M memory estimates (HMF-Audit 8000 MB, EVSEB 3000,
+DHT-backed 3000, BLAS 1500) are extrapolated from 100k peaks, not measured at 10M; override
+with `INGEST_MEM_MB_<SYSTEM>` (for example `INGEST_MEM_MB_HMF_AUDIT=10000`) and
+`INGEST_MEM_RESERVE_MB`. `bash scripts/test_parallel.sh` tests the guards with fake jobs.
+Nothing protects against another process writing to the same databases while it runs.
+
 `environment.txt` records this. If a Cassandra VM reports write timeouts while
 seeding, lower `FAIR_HMF_SEED_CONCURRENCY`.
 
