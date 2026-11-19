@@ -177,7 +177,22 @@ start_services() {
 }
 
 # export_fair_env: the variables the (unchanged) fair fixtures read.
+# use_native_queries: Experiment 1 and the ingest run the native clustered/scattered query
+# sets of native-queries/<records>/ (README there) instead of the fixed placements. Only
+# those two scripts call it: Experiments 2 and 3 keep the synthetic ALL tree and placements,
+# so FAIR_QUERY_DIR is unset for them (export_fair_env). DHT-backed is capped at FAIR_DHT_MAX_Q
+# (default 2048, so it runs q = 1..1024) because of its working-memory bounds.
+use_native_queries() {
+    local dir="$EXP_DIR/native-queries/$RECORDS"
+    [[ -f "$dir/R0_queries.json" && -f "$dir/dht_evseb_queries.json" && -f "$dir/dataset.sha256" ]]         || die "no query sets for $RECORDS records in $dir; generate them with: $PYTHON $EXP_DIR/native-queries/make_queries.py --dataset $DATASET --out $dir"
+    [[ "$(tr -d '[:space:]' <"$dir/dataset.sha256")" == "$DATASET_SHA256" ]]         || die "the query sets in $dir were made for a different dataset than $DATASET (sha256 $DATASET_SHA256); regenerate them"
+    export FAIR_QUERY_DIR="$(winpath "$dir")"
+    export FAIR_DHT_MAX_Q="${FAIR_DHT_MAX_Q:-2048}"
+    note "native query sets: $dir (DHT-backed capped at q=$FAIR_DHT_MAX_Q)"
+}
+
 export_fair_env() {
+    unset FAIR_QUERY_DIR
     export CGO_ENABLED=0 GOMAXPROCS=1
     export FAIR_PERSISTENCE=1
     export FAIR_DATASET_PATH="$(winpath "$DATASET")"

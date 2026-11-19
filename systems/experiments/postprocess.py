@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 import platform
 import statistics
 import subprocess
@@ -61,6 +62,20 @@ def command_output(*command: str) -> str:
 
 
 # --------------------------------------------------------------------- env
+def native_environment_lines(args: argparse.Namespace) -> list[str]:
+    """Request sizes and query selection: the native query sets, or the fixed placements."""
+    query_dir = getattr(args, "query_dir", None)
+    if not query_dir:
+        return ["requested_counts=1,16,64,256,1024,4096,16384", "query_distributions=clustered-2,scattered"]
+    return [
+        "requested_counts=1,16,64,256,1024,4096",
+        "query_distributions=clustered,scattered",
+        f"native_query_dir={query_dir}",
+        "native_queries=up to 5 clustered and 5 scattered audit batches per scheme and q (native-queries/README.md)",
+        f"dht_backed_max_q={getattr(args, 'dht_max_q', 2048)}",
+    ]
+
+
 def write_environment(args: argparse.Namespace) -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -98,14 +113,13 @@ def write_environment(args: argparse.Namespace) -> None:
         "subset_selection_seed=none (deterministic formula)",
         "workload_selection_randomness=none",
         f"subset_selection={args.per_region} evenly spaced records from each region R0..R{args.regions - 1}, grouped by region",
-        "requested_counts=1,16,64,256,1024,4096,16384",
-        "query_distributions=clustered-2,scattered",
+        *native_environment_lines(args),
         f"region0_records={args.per_region}",
         f"region1_records={args.per_region}",
         f"hmf_shards_per_region={args.shards_per_region}",
         f"hmf_segment_leaves={args.segment_leaves}",
         f"hmf_first_shard_records={first_shard}",
-        "clustered_segment_spans=2",
+        "clustered_segment_spans=2 (legacy placements only)",
         "hmf_hpp_concurrency=8",
         f"dht_epoch_capacity={records}",
         "dht_stride=8",
@@ -146,6 +160,10 @@ def run_exp1(args: argparse.Namespace) -> None:
         "--bench-time", args.bench_time, "--metadata-seed", "42",
         "--systems", args.systems, "--verification-only",
     ]
+    if getattr(args, "query_dir", None):
+        command += ["--query-dir", args.query_dir]
+        if "dht-backed" in args.systems.split(","):
+            command += ["--max-q", f"DHT-backed={args.dht_max_q}"]
     subprocess.run(command, check=True)
 
 
@@ -347,6 +365,8 @@ def main() -> None:
     env.add_argument("--postgres-endpoint", default="127.0.0.1:55432/fair_benchmark")
     env.add_argument("--cassandra-endpoint", default="127.0.0.1:19042")
     env.add_argument("--anchor-endpoint", default="none (in-memory chains)")
+    env.add_argument("--query-dir", default=os.environ.get("FAIR_QUERY_DIR", ""))
+    env.add_argument("--dht-max-q", type=int, default=int(os.environ.get("FAIR_DHT_MAX_Q", "2048")))
     env.set_defaults(handler=write_environment)
 
     for name, handler in (("exp1", run_exp1), ("exp2", run_exp2), ("exp3", run_exp3)):
@@ -358,6 +378,8 @@ def main() -> None:
             p.add_argument("--warmup", type=int, required=True)
             p.add_argument("--bench-time", required=True)
             p.add_argument("--systems", default="hmf-audit,dht-backed,blas,evseb")
+            p.add_argument("--query-dir", default=os.environ.get("FAIR_QUERY_DIR", ""))
+            p.add_argument("--dht-max-q", type=int, default=int(os.environ.get("FAIR_DHT_MAX_Q", "2048")))
         p.set_defaults(handler=handler)
 
     compare = sub.add_parser("compare")

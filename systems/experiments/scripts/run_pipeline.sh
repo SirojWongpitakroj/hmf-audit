@@ -18,10 +18,10 @@
 # --records defaults to 10000000. 100000 runs the identical pipeline on the
 # deterministic 100k subset (a dry run before committing to the 10M run).
 #
-# The default systems for experiment 1 are hmf-audit,blas,evseb: dht-backed is
-# rejected by its own memory bounds at q = 4096 and 16384 (see README.md, "Known
-# limitations"), which would stop the run. Add it back with
-# --systems hmf-audit,dht-backed,blas,evseb if that has been resolved.
+# Experiment 1 runs the native clustered/scattered query sets of
+# native-queries/<records>/ (see the README there) for all four systems, q = 1..4096.
+# DHT-backed is capped at FAIR_DHT_MAX_Q (default 2048, so it runs q = 1..1024): its own
+# memory bounds reject the larger scattered batches (README.md, "Known limitations").
 #
 # NOTE: the experiment scripts re-seed the databases when each one starts (the
 # fixtures truncate first), so step 3 is repeated work at 10M. It is on by
@@ -35,7 +35,7 @@ set -euo pipefail
 
 SKIP_INGEST=0
 records=10000000
-pipeline_systems="hmf-audit,blas,evseb"
+pipeline_systems="hmf-audit,dht-backed,blas,evseb"
 forward=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -105,7 +105,8 @@ R1="$OUTPUT/exp1_verification"
 R2="$OUTPUT/exp2_localization"
 R3="$OUTPUT/exp3_ablation"
 "$PYTHON" "$POSTPROCESS" exp1 --results-dir "$(winpath "$R1")" --dataset "$(winpath "$DATASET")" \
-    --count "$COUNT" --warmup "$WARMUP" --bench-time "$BENCHTIME" --systems "$pipeline_systems"
+    --count "$COUNT" --warmup "$WARMUP" --bench-time "$BENCHTIME" --systems "$pipeline_systems" \
+    --query-dir "$(winpath "$EXP_DIR/native-queries/$records")" --dht-max-q "${FAIR_DHT_MAX_Q:-2048}"
 "$PYTHON" "$POSTPROCESS" exp2 --results-dir "$(winpath "$R2")" --dataset "$(winpath "$DATASET")" \
     --count "$COUNT" --warmup "$WARMUP" --bench-time "$BENCHTIME"
 "$PYTHON" "$POSTPROCESS" exp3 --results-dir "$(winpath "$R3")" --count "$COUNT"

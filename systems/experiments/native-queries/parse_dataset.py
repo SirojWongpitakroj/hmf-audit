@@ -17,9 +17,11 @@ from collections import Counter
 import numpy as np
 
 path, out = sys.argv[1], sys.argv[2]
-N = 10_000_000
+with open(path, encoding="utf-8") as _f:
+    N = sum(1 for _ in _f)
+print(f"{N:,} records", flush=True)
 TOKEN = re.compile(r"[^\W\d_]+")
-PREFIX = 300_000
+PREFIX = min(300_000, N // 10)
 CANDIDATES = 64
 
 

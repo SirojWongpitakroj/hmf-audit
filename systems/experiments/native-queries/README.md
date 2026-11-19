@@ -2,7 +2,18 @@
 
 HMF-Audit and BLAS (native queries, region R0) come first; DHT-backed and EVSEB (tree locality) are at the end.
 
-Found on the pinned 10,000,000-record subset (SHA-256 `a8fa53db…`), region **R0**: 2,500,000 logs in 306 segments of 8,192 leaves. Each query returns **exactly q logs**. Five queries for each scheme, shape and q in {1, 16, 64, 256, 1024, 4096}: 120 queries. The full machine-readable list is `R0_queries.json`.
+**Used by Experiment 1.** `exp1_verification.sh` and `ingest.sh` run these query sets
+(`FAIR_QUERY_DIR=native-queries/<records>`), with up to five clustered and five scattered
+audit batches per scheme and q in {1, 16, 64, 256, 1024, 4096}; DHT-backed stops at
+q = 1024 (`FAIR_DHT_MAX_Q`, default 2048). Each dataset size has its own directory:
+`10000000/` (the pinned 10M subset) and `100000/` (a dry run), each holding
+`R0_queries.json`, `dht_evseb_queries.json` and `dataset.sha256`; the scripts refuse a
+directory made for another dataset. Generate a new one with
+`python make_queries.py --dataset <jsonl> --out <dir>`. Cells with fewer than five distinct
+queries (the small 100k set) carry a `note` entry and run with the sets that exist.
+Experiments 2 and 3 do not use them. The result tables below are for the 10M set.
+
+Found on the pinned 10,000,000-record subset (SHA-256 `a8fa53db…`), region **R0**: 2,500,000 logs in 306 segments of 8,192 leaves. Each query returns **exactly q logs**. Five queries for each scheme, shape and q in {1, 16, 64, 256, 1024, 4096}: 120 queries. The full machine-readable list is `10000000/R0_queries.json` (HMF-Audit and BLAS, including each query's record ordinals).
 
 ## How to read it
 
@@ -10,7 +21,7 @@ Found on the pinned 10,000,000-record subset (SHA-256 `a8fa53db…`), region **R
 * **HMF-Audit query** = (region, service, log type, time range `[from, to]`, optional tenant). A time range returns every log of the group in the range, so no window splits logs that share an event time. Tenant "any" means the new single all-tenant query.
 * **BLAS query** = time range + keyword expression over BLAS's vocabulary: the 16 most frequent tokens (`info, task, executor, stage, tid, storage, block, bytes, update, row, rdd, python, pythonrunner, init, times, total`) plus `other` for logs with none of them. The fair fixture timestamps a log as 2017-01-01 + its global ordinal in milliseconds (no log text carries a timestamp), so a BLAS time range is an ordinal range.
 * **q = 1** is one log: "clustered" takes logs from the first segments, "scattered" takes the log nearest 10%, 30%, 50%, 70% and 90% of the region.
-* **Not run through the real systems.** Counts and positions were computed from the dataset with the same rules the fixtures use. The queries have not been executed against HMF-Audit or BLAS; run a few before relying on them.
+* **Checked against the real systems at 100k only.** Counts and positions were computed from the dataset with the same rules the fixtures use. Experiment 1 re-checks every HMF-Audit and BLAS result against the query file at run time; this has run end to end on the 100k set, not yet on the 10M set.
 
 ## Summary (segments touched / span of region, per query)
 
@@ -281,7 +292,7 @@ Found on the pinned 10,000,000-record subset (SHA-256 `a8fa53db…`), region **R
 
 ```bash
 python parse_dataset.py <10M jsonl> arrays.npz        # about 2 minutes: one pass over the file
-python find_queries.py arrays.npz R0_queries.json R0  # about 3 minutes for BLAS
+python find_queries.py arrays.npz R0_queries.json R0  # about 3 minutes for BLAS (make_queries.py runs all four steps)
 ```
 Needs Python 3.9+ and numpy. Pass another region (`R1`, `R2`, `R3`) to search it instead.
 
@@ -289,7 +300,7 @@ Needs Python 3.9+ and numpy. Pass another region (`R1`, `R2`, `R3`) to search it
 
 # DHT-backed and EVSEB (tree locality)
 
-For these two schemes an audit batch is a set of **q record IDs** (record ID = global ordinal, zero-padded to 12 digits; EVSEB's LID is the same string). Clustered and scattered are defined by where the records sit in each scheme's Merkle tree. Five batches per scheme, shape and q in {1, 16, 64, 256, 1024, 4096}: 120 batches. All record ordinals are in `dht_evseb_queries.json`; the scripts are `map_dht_leaves.py` (about 30 s) and `find_tree_queries.py`.
+For these two schemes an audit batch is a set of **q record IDs** (record ID = global ordinal, zero-padded to 12 digits; EVSEB's LID is the same string). Clustered and scattered are defined by where the records sit in each scheme's Merkle tree. Five batches per scheme, shape and q in {1, 16, 64, 256, 1024, 4096}: 120 batches. All record ordinals are in `10000000/dht_evseb_queries.json`; the scripts are `map_dht_leaves.py` (about 30 s) and `find_tree_queries.py`.
 
 | Scheme | Clustered (high locality) | Scattered (low locality) |
 |---|---|---|
@@ -409,5 +420,5 @@ For these two schemes an audit batch is a set of **q record IDs** (record ID = g
 
 Record IDs for any batch: `str(ordinal).zfill(12)`, for example ordinal 4,000,000 is `000004000000`.
 
-**Checked independently.** The raw dataset was re-read and every batch's lookups, ancestors, windows and tree nodes were recomputed with plain set-based code; the clustered and scattered definitions were checked on every batch. **Not run through the real systems:** the batches have not been executed against DHT-backed or EVSEB.
+**Checked independently.** The raw dataset was re-read and every batch's lookups, ancestors, windows and tree nodes were recomputed with plain set-based code; the clustered and scattered definitions were checked on every batch. **Run through the real systems at 100k only:** DHT-backed and EVSEB batches ran in the Experiment 1 smoke run on the 100k set, not yet on the 10M set.
 

@@ -58,57 +58,80 @@ func BenchmarkFairDHTVerificationRequest(b *testing.B) {
 	runtime.GC()
 	debug.FreeOSMemory()
 
+	runCase := func(name string, batchSize int, ids []string) {
+		b.Run(name, func(b *testing.B) {
+			b.StopTimer()
+			// A complete benchmark suite can exceed the token's fixed one-hour
+			// validity. Issue one for each benchmark execution so setup,
+			// calibration, and earlier cases cannot age it out. Issuance remains
+			// outside the measured request interval.
+			token := fixture.ca.Issue("fair-auditor", fairDHTEpoch, fixture.config.LogTypes)
+			runRequest := func() (verifier.Result, error) {
+				return persistentVerifier.VerifyBatch(ctx, &token, ids)
+			}
+			proofs.ResetStats()
+			validation, err := runRequest()
+			if err != nil || !validation.Accepted {
+				b.Fatalf("validation accepted=%v err=%v", validation.Accepted, err)
+			}
+			reads := proofs.Stats()
+			warmup := fairDHTWarmupCount(b)
+			for range warmup {
+				result, err := runRequest()
+				if err != nil || !result.Accepted {
+					b.Fatalf("warm-up accepted=%v err=%v", result.Accepted, err)
+				}
+				fairDHTResult = result
+			}
+			b.ResetTimer()
+			b.ReportMetric(float64(batchSize), "records/op")
+			if os.Getenv("FAIR_QUERY_DIR") != "" {
+				b.ReportMetric(9, "workload-version/op")
+			} else if os.Getenv("FAIR_REGION0_RECORDS") != "" {
+				b.ReportMetric(8, "workload-version/op")
+			}
+			b.ReportMetric(float64(validation.HashCount), "hashes/op")
+			b.ReportMetric(float64(validation.Ancestors), "ancestors/op")
+			b.ReportMetric(float64(reads.Lookups), "cassandra-dht-lookups/op")
+			b.ReportMetric(float64(reads.RoutingReads), "dht-routing-reads/op")
+			b.ReportMetric(float64(proofs.HopsPerLookup()), "dht-hops-per-lookup/op")
+			b.ReportMetric(float64(proofs.Peers()), "dht-peers/op")
+			b.ReportMetric(float64(proofs.Concurrency()), "dht-concurrency/op")
+			b.ReportMetric(1, "postgres-batches/op")
+			b.ReportMetric(1, "proof-generation/op")
+			b.ReportMetric(float64(warmup), "warmup-ops")
+			b.StartTimer()
+			for range b.N {
+				result, err := runRequest()
+				if err != nil || !result.Accepted {
+					b.Fatalf("request accepted=%v err=%v", result.Accepted, err)
+				}
+				fairDHTResult = result
+			}
+		})
+	}
+	// Native query sets: with FAIR_QUERY_DIR set, run the five clustered and five
+	// scattered record sets per q from the query file instead of the fixed placements.
+	if dir := os.Getenv("FAIR_QUERY_DIR"); dir != "" {
+		maxQ, err := fairDHTMaxQ(os.Getenv("FAIR_DHT_MAX_Q"))
+		if err != nil {
+			b.Fatal(err)
+		}
+		cases, err := fairDHTNativeCases(dir, maxQ)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for _, c := range cases {
+			for _, set := range c.Sets {
+				runCase(fmt.Sprintf("%s/q=%d/set=%d", c.Shape, c.Q, set.Set), c.Q, set.IDs)
+			}
+		}
+		return
+	}
 	for _, placement := range fairDHTPlacements {
 		for _, batchSize := range fairDHTRequestCounts {
 			ids := fixture.batches[fairDHTCase{placement: placement, count: batchSize}]
-			b.Run(fmt.Sprintf("%s/q=%d", placement, batchSize), func(b *testing.B) {
-				b.StopTimer()
-				// A complete benchmark suite can exceed the token's fixed one-hour
-				// validity. Issue one for each benchmark execution so setup,
-				// calibration, and earlier cases cannot age it out. Issuance remains
-				// outside the measured request interval.
-				token := fixture.ca.Issue("fair-auditor", fairDHTEpoch, fixture.config.LogTypes)
-				runRequest := func() (verifier.Result, error) {
-					return persistentVerifier.VerifyBatch(ctx, &token, ids)
-				}
-				proofs.ResetStats()
-				validation, err := runRequest()
-				if err != nil || !validation.Accepted {
-					b.Fatalf("validation accepted=%v err=%v", validation.Accepted, err)
-				}
-				reads := proofs.Stats()
-				warmup := fairDHTWarmupCount(b)
-				for range warmup {
-					result, err := runRequest()
-					if err != nil || !result.Accepted {
-						b.Fatalf("warm-up accepted=%v err=%v", result.Accepted, err)
-					}
-					fairDHTResult = result
-				}
-				b.ResetTimer()
-				b.ReportMetric(float64(batchSize), "records/op")
-				if os.Getenv("FAIR_REGION0_RECORDS") != "" {
-					b.ReportMetric(8, "workload-version/op")
-				}
-				b.ReportMetric(float64(validation.HashCount), "hashes/op")
-				b.ReportMetric(float64(validation.Ancestors), "ancestors/op")
-				b.ReportMetric(float64(reads.Lookups), "cassandra-dht-lookups/op")
-				b.ReportMetric(float64(reads.RoutingReads), "dht-routing-reads/op")
-				b.ReportMetric(float64(proofs.HopsPerLookup()), "dht-hops-per-lookup/op")
-				b.ReportMetric(float64(proofs.Peers()), "dht-peers/op")
-				b.ReportMetric(float64(proofs.Concurrency()), "dht-concurrency/op")
-				b.ReportMetric(1, "postgres-batches/op")
-				b.ReportMetric(1, "proof-generation/op")
-				b.ReportMetric(float64(warmup), "warmup-ops")
-				b.StartTimer()
-				for range b.N {
-					result, err := runRequest()
-					if err != nil || !result.Accepted {
-						b.Fatalf("request accepted=%v err=%v", result.Accepted, err)
-					}
-					fairDHTResult = result
-				}
-			})
+			runCase(fmt.Sprintf("%s/q=%d", placement, batchSize), batchSize, ids)
 		}
 	}
 }

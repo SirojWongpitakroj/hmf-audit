@@ -19,6 +19,7 @@ declare -A PATTERN=(
     [evseb]='^BenchmarkFairEVBESVerificationRequest$'
 )
 
+use_native_queries
 write_environment exp1_verification "$SYSTEMS" "$RESULTS"
 IFS=',' read -r -a selected <<<"$SYSTEMS"
 for system in "${selected[@]}"; do

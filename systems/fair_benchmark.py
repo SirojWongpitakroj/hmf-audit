@@ -28,6 +28,57 @@ TAMPER_COUNT_BATCH_SIZE = 1 << 14
 TAMPER_COUNTS = (1, 2, 4, 8, 16, 32, 64, 128, 256)
 P99_MINIMUM_TRIALS = 100
 
+# Native query sets (--query-dir): the clustered and scattered audit batches of
+# systems/experiments/native-queries/<records>/ (several per shape and q) replace the fixed
+# clustered-2/scattered placements in the verification experiment. None = legacy protocol.
+NATIVE: dict[str, Any] | None = None
+NATIVE_PLACEMENTS = ("clustered", "scattered")
+NATIVE_PLACEMENT_TITLES = {"clustered": "Clustered batches", "scattered": "Scattered batches"}
+NATIVE_WORKLOAD_VERSION = 9
+NATIVE_SCHEME_FILES = (
+    ("R0_queries.json", ("HMF-Audit", "BLAS")),
+    ("dht_evseb_queries.json", ("DHT-backed", "EVSEB")),
+)
+
+
+def active_placements() -> tuple[str, ...]:
+    return NATIVE_PLACEMENTS if NATIVE is not None else PLACEMENTS
+
+
+def request_counts_for(system: str) -> tuple[int, ...]:
+    """The q values a system is measured at: the protocol's, or those in the query files."""
+    if NATIVE is None:
+        return REQUEST_COUNTS
+    return tuple(sorted({q for (name, _shape, q) in NATIVE["cells"] if name == system}))
+
+
+def native_sets(system: str, placement: str, q: int) -> list[int]:
+    return NATIVE["cells"].get((system, placement, q), []) if NATIVE is not None else []
+
+
+def load_native(query_dir: Path, max_q: dict[str, int]) -> dict[str, Any]:
+    """Read the query files: cells[(system, shape, q)] = sorted set numbers."""
+    cells: dict[tuple[str, str, int], list[int]] = defaultdict(list)
+    files: dict[str, str] = {}
+    records = None
+    for filename, schemes in NATIVE_SCHEME_FILES:
+        file_path = query_dir / filename
+        if not file_path.exists():
+            raise SystemExit(f"missing query file {file_path}; generate it with native-queries/make_queries.py")
+        data = json.loads(file_path.read_text(encoding="utf-8"))
+        files[filename] = sha256_file(file_path)
+        records = data.get("records", records)
+        for entry in data["queries"]:
+            if "note" in entry or entry["scheme"] not in schemes:
+                continue
+            cap = max_q.get(entry["scheme"])
+            if cap is not None and entry["q"] > cap:
+                continue
+            cells[(entry["scheme"], entry["shape"], entry["q"])].append(entry["set"])
+    for key in cells:
+        cells[key].sort()
+    return {"dir": str(query_dir), "cells": dict(cells), "files": files, "records": records, "max_q": dict(max_q)}
+
 BENCHMARKS: dict[str, dict[str, Any]] = {
     "BenchmarkFairHMFVerificationCore": {
         "system": "HMF-Audit",
@@ -115,8 +166,9 @@ DIRECT_VERIFICATION_SYSTEMS = {"HMF-Audit", "DHT-backed", "EVSEB"}
 NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
 BENCHMARK_LINE = re.compile(
     rf"(?P<benchmark>BenchmarkFair[A-Za-z0-9]+)"
-    rf"/(?P<placement>clustered-2|scattered)"
+    rf"/(?P<placement>clustered-2|clustered|scattered)"
     rf"/q=(?P<q>\d+)"
+    rf"(?:/set=(?P<query_set>\d+))?"
     rf"(?:/tampered=(?P<tamper_count>\d+))?"
     rf"(?:-\d+)?\s+"
     rf"(?P<iterations>\d+)\s+"
@@ -198,6 +250,7 @@ def parse_result_file(path: Path) -> list[dict[str, Any]]:
                 "input_semantics": metadata["input_semantics"],
                 "output_semantics": metadata["output_semantics"],
                 "placement": match.group("placement"),
+                "query_set": (int(match.group("query_set")) if match.group("query_set") else None),
                 "q": q,
                 "tamper_count": tamper_count,
                 "iterations_in_timing_window": int(match.group("iterations")),
@@ -219,44 +272,61 @@ def validate_trials(
     expected_by_file: dict[str, set[str]],
     verification_only: bool = False,
 ) -> None:
-    grouped: dict[tuple[str, str, int, int], list[dict[str, Any]]] = defaultdict(list)
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        grouped[(row["benchmark"], row["placement"], row["q"], row["tamper_count"])].append(row)
+        grouped[(row["benchmark"], row["placement"], row["q"], row["tamper_count"], row.get("query_set"))].append(row)
 
     errors: list[str] = []
-    for filename, benchmarks in expected_by_file.items():
-        for benchmark in benchmarks:
-            for placement in PLACEMENTS:
-                metadata = BENCHMARKS[benchmark]
-                cases = (
-                    ((TAMPER_COUNT_BATCH_SIZE, tamper_count) for tamper_count in TAMPER_COUNTS)
-                    if metadata["figure"] == 3
-                    else ((q, 1 if metadata["figure"] == 2 else 0) for q in REQUEST_COUNTS)
-                )
-                for q, tamper_count in cases:
-                    key = (benchmark, placement, q, tamper_count)
-                    count = len(grouped.get(key, ()))
-                    if count != expected_repetitions:
-                        errors.append(
-                            f"{filename}: {benchmark}/{placement}/q={q}/tampered={tamper_count} has "
-                            f"{count} trials, expected {expected_repetitions}"
+    expected_keys: set[tuple[Any, ...]] = set()
+    if NATIVE is not None:
+        # Every (system, shape, q, set) of the query files must have exactly the expected
+        # number of trials, and nothing else may appear.
+        for filename, benchmarks in expected_by_file.items():
+            for benchmark in benchmarks:
+                system = BENCHMARKS[benchmark]["system"]
+                for placement in NATIVE_PLACEMENTS:
+                    for q in request_counts_for(system):
+                        for query_set in native_sets(system, placement, q):
+                            key = (benchmark, placement, q, 0, query_set)
+                            expected_keys.add(key)
+                            count = len(grouped.get(key, ()))
+                            if count != expected_repetitions:
+                                errors.append(
+                                    f"{filename}: {benchmark}/{placement}/q={q}/set={query_set} has "
+                                    f"{count} trials, expected {expected_repetitions}"
+                                )
+    else:
+        for filename, benchmarks in expected_by_file.items():
+            for benchmark in benchmarks:
+                for placement in PLACEMENTS:
+                    metadata = BENCHMARKS[benchmark]
+                    cases = (
+                        ((TAMPER_COUNT_BATCH_SIZE, tamper_count) for tamper_count in TAMPER_COUNTS)
+                        if metadata["figure"] == 3
+                        else ((q, 1 if metadata["figure"] == 2 else 0) for q in REQUEST_COUNTS)
+                    )
+                    for q, tamper_count in cases:
+                        key = (benchmark, placement, q, tamper_count, None)
+                        count = len(grouped.get(key, ()))
+                        if count != expected_repetitions:
+                            errors.append(
+                                f"{filename}: {benchmark}/{placement}/q={q}/tampered={tamper_count} has "
+                                f"{count} trials, expected {expected_repetitions}"
+                            )
+        for benchmarks in expected_by_file.values():
+            for benchmark in benchmarks:
+                figure = BENCHMARKS[benchmark]["figure"]
+                for placement in PLACEMENTS:
+                    if figure == 3:
+                        expected_keys.update(
+                            (benchmark, placement, TAMPER_COUNT_BATCH_SIZE, tamper_count, None)
+                            for tamper_count in TAMPER_COUNTS
                         )
-
-    expected_keys: set[tuple[str, str, int, int]] = set()
-    for benchmarks in expected_by_file.values():
-        for benchmark in benchmarks:
-            figure = BENCHMARKS[benchmark]["figure"]
-            for placement in PLACEMENTS:
-                if figure == 3:
-                    expected_keys.update(
-                        (benchmark, placement, TAMPER_COUNT_BATCH_SIZE, tamper_count)
-                        for tamper_count in TAMPER_COUNTS
-                    )
-                else:
-                    expected_keys.update(
-                        (benchmark, placement, q, 1 if figure == 2 else 0)
-                        for q in REQUEST_COUNTS
-                    )
+                    else:
+                        expected_keys.update(
+                            (benchmark, placement, q, 1 if figure == 2 else 0, None)
+                            for q in REQUEST_COUNTS
+                        )
     for key in grouped:
         if key not in expected_keys:
             errors.append(f"unexpected benchmark case {key}")
@@ -276,17 +346,27 @@ def validate_trials(
             errors.append(
                 f"{row['source_file']}:{row['source_line']}: nonpositive iterations"
             )
-        if verification_only and row["metrics"].get("workload-version/op") != 8:
+        wanted_version = NATIVE_WORKLOAD_VERSION if NATIVE is not None else 8
+        if verification_only and row["metrics"].get("workload-version/op") != wanted_version:
             errors.append(
-                f"{row['source_file']}:{row['source_line']}: missing v8 workload marker; "
-                "older raw trials select different record IDs"
+                f"{row['source_file']}:{row['source_line']}: missing v{wanted_version} workload marker; "
+                "raw trials from another query protocol select different records"
+            )
+        if NATIVE is not None and row["metrics"].get("records/op") != row["q"]:
+            errors.append(
+                f"{row['source_file']}:{row['source_line']}: records/op="
+                f"{row['metrics'].get('records/op')!r}, expected q={row['q']}"
             )
         actual_tampers = row["metrics"].get("tampered-records/op")
         if verification_only and row["benchmark"] == "BenchmarkFairHMFVerificationCore":
-            if row["metrics"].get("all-queries/op") != 1 or row["metrics"].get("all-entries/op") != row["q"]:
+            entries = row["metrics"].get("all-entries/op")
+            # Legacy: the range holds exactly q entries. Native: a tenant filter narrows a range
+            # that covers every tenant, so the range holds at least q.
+            enough = entries is not None and (entries >= row["q"] if NATIVE is not None else entries == row["q"])
+            if row["metrics"].get("all-queries/op") != 1 or not enough:
                 errors.append(
-                    f"{row['source_file']}:{row['source_line']}: ALL did not return "
-                    f"exactly q={row['q']} entries in one query"
+                    f"{row['source_file']}:{row['source_line']}: ALL did not answer q={row['q']} "
+                    f"records in one query (range entries: {entries})"
                 )
         if row["figure"] in (2, 3) and actual_tampers is None:
             errors.append(
@@ -691,6 +771,70 @@ def build_workload_manifest(
     }
 
 
+def apply_native_manifest(manifest: dict[str, Any], systems: set[str]) -> None:
+    """Replace the legacy workloads of a verification manifest with the native query sets."""
+    assert NATIVE is not None
+    workloads = []
+    for filename, schemes in NATIVE_SCHEME_FILES:
+        data = json.loads((Path(NATIVE["dir"]) / filename).read_text(encoding="utf-8"))
+        for entry in data["queries"]:
+            if "note" in entry or entry["scheme"] not in schemes or entry["scheme"] not in systems:
+                continue
+            if entry["q"] not in request_counts_for(entry["scheme"]):
+                continue
+            ordinals = entry["record_ordinals"]
+            workload = {
+                "workload_id": f"{entry['scheme']}/{entry['shape']}/q={entry['q']}/set={entry['set']}",
+                "scheme": entry["scheme"],
+                "query_distribution": entry["shape"],
+                "requested_count_q": entry["q"],
+                "query_set": entry["set"],
+                "record_count": len(ordinals),
+                "record_ordinals_sha256": hashlib.sha256(
+                    ",".join(str(value) for value in sorted(ordinals)).encode()
+                ).hexdigest(),
+                "first_ordinal": min(ordinals),
+                "last_ordinal": max(ordinals),
+                "verification": {"tamper_count": 0, "tampered_record_ids": []},
+            }
+            for field in ("service", "log_type", "tenant", "time_range", "keyword_expression",
+                          "time_range_ms", "log_types"):
+                if field in entry:
+                    workload[field] = entry[field]
+            workloads.append(workload)
+    manifest["schema_version"] = 3
+    manifest["workloads"] = workloads
+    manifest["benchmark_parameters"]["requested_counts_q"] = sorted(
+        {q for (_name, _shape, q) in NATIVE["cells"]}
+    )
+    manifest["benchmark_parameters"]["query_distributions"] = list(NATIVE_PLACEMENTS)
+    manifest["benchmark_parameters"]["native_query_files"] = NATIVE["files"]
+    manifest["benchmark_parameters"]["native_query_sets_per_cell"] = {
+        f"{name}/{shape}/q={q}": len(sets) for (name, shape, q), sets in sorted(NATIVE["cells"].items())
+    }
+    manifest["benchmark_parameters"]["system_max_q"] = NATIVE["max_q"]
+    manifest["selection_rules"] = {
+        "clustered": (
+            "HMF-Audit and BLAS: a native query whose q results lie in one 8,192-leaf segment or two "
+            "adjacent ones. DHT-backed and EVSEB: q consecutive leaves aligned to q, one perfect subtree."
+        ),
+        "scattered": (
+            "HMF-Audit and BLAS: the widest native query available (spread over as much of region R0 as "
+            "possible). DHT-backed: q records in as many different (log type, ancestor) pairs as exist. "
+            "EVSEB: q leaves spaced N/q apart, each in a different branch."
+        ),
+        "sets": "up to five queries per scheme, shape and q; the trials of a cell pool all its sets",
+        "source": "systems/experiments/native-queries/README.md",
+    }
+    manifest["system_semantics"]["HMF-Audit verification"] = (
+        "one proof-verified ALL range query over the real service, log type, region and time range "
+        "(all tenants; a tenant filter applies after verification), followed by HPP subset verification"
+    )
+    manifest["system_semantics"]["BLAS verification"] = (
+        "native three-stage proof generation and verification of a time-range plus keyword query"
+    )
+
+
 def workload_lookup(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {item["workload_id"]: item for item in manifest["workloads"]}
 
@@ -727,6 +871,7 @@ def write_trials(
         "output_semantics",
         "workload_id",
         "query_distribution",
+        "query_set",
         "requested_count_q",
         "tamper_count",
         "tampered_record_id",
@@ -751,11 +896,15 @@ def write_trials(
                 item["system"],
                 item["placement"],
                 item["q"],
+                item.get("query_set") or 0,
                 item["tamper_count"],
                 item["repetition"],
             ),
         ):
-            workload_id = f"{row['placement']}/q={row['q']}"
+            if row.get("query_set") is not None:
+                workload_id = f"{row['system']}/{row['placement']}/q={row['q']}/set={row['query_set']}"
+            else:
+                workload_id = f"{row['placement']}/q={row['q']}"
             if row["figure"] == 3:
                 workload_id += f"/tampered={row['tamper_count']}"
             workload = workloads[workload_id]
@@ -778,6 +927,7 @@ def write_trials(
                 "output_semantics": row["output_semantics"],
                 "workload_id": workload_id,
                 "query_distribution": row["placement"],
+                "query_set": row.get("query_set") or "",
                 "requested_count_q": row["q"],
                 "tamper_count": row["tamper_count"],
                 "tampered_record_id": (
@@ -850,6 +1000,7 @@ def summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "requested_count_q": q,
                 "tamper_count": tamper_count,
                 "trials": count,
+                "query_sets": len({row.get("query_set") for row in samples} - {None}) or 1,
                 "mean_ms": statistics.fmean(values_ns) / 1_000_000,
                 "stddev_ms": (
                     statistics.stdev(values_ns) / 1_000_000
@@ -889,6 +1040,7 @@ def write_summary(path: Path, rows: list[dict[str, Any]]) -> None:
         "requested_count_q",
         "tamper_count",
         "trials",
+        "query_sets",
         "mean_ms",
         "stddev_ms",
         "p50_ms",
@@ -970,8 +1122,10 @@ def plot_one_figure(
         ) from error
 
     styles = figure_styles()
-    fig, axes = plt.subplots(1, len(PLACEMENTS), figsize=(5.5 * len(PLACEMENTS), 5.8), sharey=True)
-    for axis, placement in zip(axes, PLACEMENTS):
+    placements = active_placements()
+    ticks = tuple(sorted({q for system in systems for q in request_counts_for(system)})) if NATIVE is not None else REQUEST_COUNTS
+    fig, axes = plt.subplots(1, len(placements), figsize=(5.5 * len(placements), 5.8), sharey=True)
+    for axis, placement in zip(axes, placements):
         for system in systems:
             selected = sorted(
                 (
@@ -983,7 +1137,7 @@ def plot_one_figure(
                 ),
                 key=lambda row: row["requested_count_q"],
             )
-            if len(selected) != len(REQUEST_COUNTS):
+            if len(selected) != len(request_counts_for(system)):
                 raise ValueError(
                     f"Figure {figure_number}: {system}/{placement} has "
                     f"{len(selected)} points"
@@ -1002,15 +1156,17 @@ def plot_one_figure(
                 label=labels[system],
             )
         axis.set_title(
-            PLACEMENT_TITLES.get(placement, placement.capitalize() + " requested IDs"),
+            (NATIVE_PLACEMENT_TITLES if NATIVE is not None else PLACEMENT_TITLES).get(
+                placement, placement.capitalize() + " requested IDs"
+            ),
             fontsize=16,
         )
         axis.set_xlabel("Requested records, q", fontsize=14)
         axis.set_xscale("log", base=2)
         axis.set_yscale("log")
-        axis.set_xticks(REQUEST_COUNTS)
+        axis.set_xticks(ticks)
         axis.set_xticklabels(
-            [f"$2^{{{int(math.log2(value))}}}$" for value in REQUEST_COUNTS],
+            [f"$2^{{{int(math.log2(value))}}}$" for value in ticks],
             fontsize=13,
         )
         axis.set_ylim(bottom=1.0, top=10**5)
@@ -1243,6 +1399,25 @@ compares scaling trends rather than strict equivalent-work speedups.
 All three figures use the same repetitions, warm-up policy, percentile method, CPU
 allocation, and process controls. {p99_note}
 """
+    if verification_only and NATIVE is not None:
+        capped = ", ".join(f"{name} up to q={cap}" for name, cap in sorted(NATIVE["max_q"].items())) or "none"
+        text = f"""# Primary benchmark figure captions
+
+## Figure 1 — Persistence-Inclusive Verification Latency
+
+P50 latency with P95 upper whiskers per point over {expected_repetitions} retained trials
+per query set (timing window {bench_time}), pooled over the query sets of each point, on the
+deterministic region-grouped benchmark dataset of {total_records:,} records. Each system answers
+its own audit batches of q records: a clustered batch lies in one subtree or one or two adjacent
+segments, a scattered batch is spread over as many subtrees, branches or segments as possible
+(definitions in systems/experiments/native-queries/README.md). The batches of different schemes
+are selected by each scheme's own structure and are not the same records. Each timer starts when
+the request arrives and covers request-dependent PostgreSQL and Cassandra reads, proof
+generation and anchored verification; the chain is in memory. Systems capped at a smaller q for
+memory bounds: {capped}. {p99_note}
+"""
+        path.write_text(text, encoding="utf-8")
+        return
     if verification_only:
         text = text.split("\n## Figure 2", maxsplit=1)[0]
         text = text.replace(
@@ -1365,6 +1540,18 @@ def parse_arguments() -> argparse.Namespace:
         action="store_true",
         help="validate and render only the verification-latency experiment",
     )
+    parser.add_argument(
+        "--query-dir",
+        type=Path,
+        help="native query sets (verification only): the directory holding R0_queries.json and dht_evseb_queries.json",
+    )
+    parser.add_argument(
+        "--max-q",
+        action="append",
+        default=[],
+        metavar="SYSTEM=Q",
+        help="largest request size measured for a system, e.g. DHT-backed=2048 (repeatable)",
+    )
     return parser.parse_args()
 
 
@@ -1372,6 +1559,17 @@ def main() -> None:
     args = parse_arguments()
     if args.expected_repetitions <= 0 or args.warmup < 0:
         raise SystemExit("repetitions must be positive and warmup nonnegative")
+    global NATIVE
+    if args.query_dir is not None:
+        if not args.verification_only:
+            raise SystemExit("--query-dir applies to the verification experiment only (--verification-only)")
+        caps: dict[str, int] = {}
+        for item in args.max_q:
+            name, _, value = item.partition("=")
+            if name not in {"HMF-Audit", "BLAS", "DHT-backed", "EVSEB"} or not value.isdigit() or int(value) <= 0:
+                raise SystemExit(f"--max-q expects SYSTEM=Q with SYSTEM one of HMF-Audit, BLAS, DHT-backed, EVSEB: {item!r}")
+            caps[name] = int(value)
+        NATIVE = load_native(args.query_dir.resolve(), caps)
     results_dir = args.results_dir.resolve()
     dataset = args.dataset.resolve()
     environment_path = results_dir / "environment.txt"
@@ -1401,6 +1599,12 @@ def main() -> None:
     hmf_parameters = manifest["system_parameters"]["HMF-Audit"]
     hmf_parameters["shards_per_region"] = int(environment.get("hmf_shards_per_region", "1"))
     hmf_parameters["leaves_per_segment"] = segment_leaves
+    if NATIVE is not None:
+        apply_native_manifest(manifest, {
+            BENCHMARKS[benchmark]["system"]
+            for name in args.systems.split(",") if name.strip()
+            for benchmark in EXPECTED_BY_FILE.get(f"{name.strip()}.txt", ())
+        })
     (results_dir / "workload_manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

@@ -22,17 +22,18 @@ import sys
 
 import numpy as np
 
-N = 10_000_000
 QS = (1, 16, 64, 256, 1024, 4096)
 FRACTIONS = (0.1, 0.3, 0.5, 0.7, 0.9)
 PHASES = (0.1, 0.3, 0.5, 0.7, 0.9)   # stratum-centred: never on a branch boundary
-LEVELS, STRIDE, WINDOW = 24, 8, 1024
-ANCESTOR_SPAN = 1 << (LEVELS - STRIDE)          # 65,536 leaf slots per ancestor
+STRIDE, WINDOW = 8, 1024
 TYPES = ["access", "api", "auth", "error", "security"]
 
 d = np.load(sys.argv[1])
 types, leaf, counts = d["types"], d["leaf"], [int(c) for c in d["counts"]]
 out_path = sys.argv[2]
+N = len(types)
+LEVELS = (N - 1).bit_length()                    # padded capacity = 2**LEVELS (24 for 10M records)
+ANCESTOR_SPAN = 1 << (LEVELS - STRIDE)           # leaf slots per level-8 ancestor (65,536 for 10M)
 ord_of = [np.flatnonzero(types == t) for t in range(5)]   # leaf index -> global ordinal
 assert all(len(ord_of[t]) == counts[t] for t in range(5))
 
@@ -128,7 +129,7 @@ def evseb_metrics(ordinals):
 
 def evseb_clustered(q, i):
     if q == 1:                                                # query i = record i of five consecutive leaves
-        return [4_000_000 + i]
+        return [(int(0.4 * N) // 8) * 8 + i]                  # 4,000,000 + i for the 10M dataset
     blocks = N // q
     s = min(int(FRACTIONS[i] * blocks), blocks - 1) * q
     return list(range(s, s + q))

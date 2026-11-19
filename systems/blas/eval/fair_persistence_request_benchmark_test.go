@@ -20,10 +20,26 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// fairBLASConcurrency is the number of concurrent PostgreSQL readers for the off-chain
+// files; HMF-Audit, DHT-backed and EVSEB also run their request I/O 8 wide.
+const fairBLASConcurrency = 8
+
 type fairBLASScenario struct {
 	placement string
 	batchSize int
 	request   query.Q
+	// set and expectedTS are used by native query sets (FAIR_QUERY_DIR): the set
+	// number and the timestamps of the records the query must return.
+	set        int
+	expectedTS []int64
+}
+
+// name is the sub-benchmark name: placement/q=N, plus /set=K for native query sets.
+func (scenario fairBLASScenario) name() string {
+	if scenario.set > 0 {
+		return fmt.Sprintf("%s/q=%d/set=%d", scenario.placement, scenario.batchSize, scenario.set)
+	}
+	return fmt.Sprintf("%s/q=%d", scenario.placement, scenario.batchSize)
 }
 
 type fairBLASRequestResult struct {
@@ -41,7 +57,7 @@ func BenchmarkFairBLASVerificationRequest(b *testing.B) {
 	b.StopTimer()
 	ctx := context.Background()
 	state := sharedFairBLAS(b)
-	database, fullNode, registry, auditor := state.database, state.fullNode, state.registry, state.auditor
+	fullNode, registry, auditor := state.fullNode, state.registry, state.auditor
 	options := verify.Options{UseSegmentScan: true, UseAggregation: true}
 
 	scenarios := make([]fairBLASScenario, 0, 2*len(fairBLASBatchSizes))
@@ -56,11 +72,19 @@ func BenchmarkFairBLASVerificationRequest(b *testing.B) {
 		}
 	}
 
+	if dir := os.Getenv("FAIR_QUERY_DIR"); dir != "" {
+		native, err := fairBLASNativeScenarios(dir, state.vocabulary)
+		if err != nil {
+			b.Fatal(err)
+		}
+		scenarios = native
+	}
+
 	for _, scenario := range scenarios {
 		scenario := scenario
-		b.Run(fmt.Sprintf("%s/q=%d", scenario.placement, scenario.batchSize), func(b *testing.B) {
+		b.Run(scenario.name(), func(b *testing.B) {
 			b.StopTimer()
-			probe, err := executeFairBLASRequest(ctx, database, fullNode, registry, auditor, scenario, options)
+			probe, err := executeFairBLASRequest(ctx, state.workers, fullNode, registry, auditor, scenario, options)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -68,7 +92,7 @@ func BenchmarkFairBLASVerificationRequest(b *testing.B) {
 
 			warmup := fairBLASWarmupCount(b)
 			for range warmup {
-				outcome, err := executeFairBLASRequest(ctx, database, fullNode, registry, auditor, scenario, options)
+				outcome, err := executeFairBLASRequest(ctx, state.workers, fullNode, registry, auditor, scenario, options)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -78,7 +102,9 @@ func BenchmarkFairBLASVerificationRequest(b *testing.B) {
 
 			b.ResetTimer()
 			b.ReportMetric(float64(scenario.batchSize), "records/op")
-			if os.Getenv("FAIR_REGION0_RECORDS") != "" {
+			if os.Getenv("FAIR_QUERY_DIR") != "" {
+				b.ReportMetric(9, "workload-version/op")
+			} else if os.Getenv("FAIR_REGION0_RECORDS") != "" {
 				b.ReportMetric(8, "workload-version/op")
 			}
 			b.ReportMetric(float64(state.datasetRecords), "dataset-records")
@@ -96,7 +122,7 @@ func BenchmarkFairBLASVerificationRequest(b *testing.B) {
 			b.ReportMetric(float64(warmup), "warmup-ops")
 			b.StartTimer()
 			for range b.N {
-				outcome, err := executeFairBLASRequest(ctx, database, fullNode, registry, auditor, scenario, options)
+				outcome, err := executeFairBLASRequest(ctx, state.workers, fullNode, registry, auditor, scenario, options)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -111,16 +137,24 @@ func validateFairBLASRequestResult(b testing.TB, scenario fairBLASScenario,
 	outcome fairBLASRequestResult) {
 	b.Helper()
 	if !outcome.result.Accept || len(outcome.result.Entries) != scenario.batchSize {
-		b.Fatalf("BLAS %s q=%d: accepted=%v entries=%d",
-			scenario.placement, scenario.batchSize,
-			outcome.result.Accept, len(outcome.result.Entries))
+		b.Fatalf("BLAS %s: accepted=%v entries=%d, want %d",
+			scenario.name(), outcome.result.Accept, len(outcome.result.Entries), scenario.batchSize)
+	}
+	if scenario.expectedTS != nil {
+		got := make([]int64, len(outcome.result.Entries))
+		for index, entry := range outcome.result.Entries {
+			got[index] = entry.TS
+		}
+		if err := fairBLASSameTimestamps(got, scenario.expectedTS); err != nil {
+			b.Fatalf("BLAS %s: %v", scenario.name(), err)
+		}
 	}
 }
 
-func executeFairBLASRequest(ctx context.Context, database *pgx.Conn,
+func executeFairBLASRequest(ctx context.Context, workers []*pgx.Conn,
 	fullNode *query.FullNode, registry map[uint64][]string, auditor *verify.Auditor,
 	scenario fairBLASScenario, options verify.Options) (fairBLASRequestResult, error) {
-	provider := query.NewPostgresSP(ctx, database)
+	provider := query.NewConcurrentPostgresSP(ctx, workers)
 	response, ok := auditor.PrepareResponse(
 		fullNode, provider, registry, scenario.request, options,
 	)
@@ -156,9 +190,11 @@ func encodeFairBLASValue(value any) ([]byte, error) {
 // the Chain value).
 type fairBLASState struct {
 	database       *pgx.Conn
-	fullNode       *query.FullNode
+	workers        []*pgx.Conn // fairBLASConcurrency readers; workers[0] is database
+	fullNode      *query.FullNode
 	auditor        *verify.Auditor
 	registry       map[uint64][]string
+	vocabulary     []string
 	blocks         int
 	datasetRecords int
 	cloudFiles     int
@@ -171,6 +207,9 @@ type fairBLASState struct {
 func TestMain(m *testing.M) {
 	code := m.Run()
 	if state := fairBLASShared.state; state != nil {
+		for _, extra := range state.workers[1:] {
+			_ = extra.Close(context.Background())
+		}
 		_ = state.database.Close(context.Background())
 	}
 	os.Exit(code)
@@ -200,6 +239,9 @@ func sharedFairBLAS(b *testing.B) *fairBLASState {
 }
 
 func seedFairBLAS(ctx context.Context) (*fairBLASState, error) {
+	// Setup only: seeding is not timed, so it may use every core. The timed
+	// requests run again under the process's GOMAXPROCS (1).
+	defer raiseFairSetupProcs()()
 	database, err := pgx.Connect(ctx, os.Getenv("FAIR_POSTGRES_DSN"))
 	if err != nil {
 		return nil, fmt.Errorf("connect PostgreSQL: %w", err)
@@ -223,11 +265,18 @@ func seedFairBLAS(ctx context.Context) (*fairBLASState, error) {
 	if _, ok := build.registry[0]; !ok {
 		return nil, fmt.Errorf("shared dataset did not produce BLAS log generator 0")
 	}
+	// Same request concurrency as HMF-Audit, DHT-backed and EVSEB: 8 readers, opened once
+	// here so connection setup is not part of any measured request.
+	workers, err := query.OpenWorkerConns(ctx, database, fairBLASConcurrency)
+	if err != nil {
+		return nil, fmt.Errorf("open BLAS reader connections: %w", err)
+	}
 	runtime.GC()
 	return &fairBLASState{
-		database: database, fullNode: query.NewFullNode(build.chain),
+		database: database, workers: workers, fullNode: query.NewFullNode(build.chain),
 		auditor: verify.NewAuditor(headers, cfg.SegmentSize), registry: build.registry,
-		blocks: len(headers), datasetRecords: total,
+		vocabulary: vocabulary,
+		blocks:     len(headers), datasetRecords: total,
 		cloudFiles: build.files, cloudBytes: build.bytes,
 	}, nil
 }
@@ -259,7 +308,12 @@ func buildAndPersistFairBLAS(ctx context.Context, database *pgx.Conn, cfg Config
 	}
 	build := &fairBLASBuild{chain: logChain, registry: map[uint64][]string{}}
 	generator := alis.NewLogGenerator(0)
-	batchKeywords := fairBLASBatchKeywords(total)
+	// The artificial batch keywords exist only to craft exact-size queries; native
+	// query sets (FAIR_QUERY_DIR) use the natural keywords alone.
+	var batchKeywords map[int][]string
+	if os.Getenv("FAIR_QUERY_DIR") == "" {
+		batchKeywords = fairBLASBatchKeywords(total)
+	}
 	var pending []alis.FileMetadata
 	var fid uint64
 	ordinal, region := 0, -1

@@ -187,13 +187,14 @@ for family, key in families.items():
 print(f"HMF-Audit {wanted_region} searched, {time.time() - t0:.0f}s", flush=True)
 
 
-def hmf_entry(shape, q, c):
-    e = {"scheme": "HMF-Audit", "region": wanted_region, "shape": shape, "q": q, "returns": q,
+def hmf_entry(shape, q, c, number):
+    e = {"scheme": "HMF-Audit", "region": wanted_region, "shape": shape, "q": q, "set": number, "returns": q,
          "service": c["service"], "log_type": c["log_type"], "tenant": c["tenant"] or "any (no tenant filter)",
          "time_range": [iso(c["start"]), iso(c["end"])], "group_size": c["group_size"]}
     e.update(stats(c["o"], size))
     if "target" in c:
         e["target_position"] = c["target"]
+    e["record_ordinals"] = sorted(int(x) + lo_g for x in c["o"])
     return with_score(e, c["o"], q)
 
 
@@ -208,8 +209,8 @@ for shape, table in (("clustered", cl), ("scattered", sc)):
                 chosen.append(c)
         else:
             chosen = pick(table[q])
-        for c in chosen:
-            queries.append(hmf_entry(shape, q, c))
+        for number, c in enumerate(chosen, 1):
+            queries.append(hmf_entry(shape, q, c, number))
         if len(chosen) < K:
             queries.append({"scheme": "HMF-Audit", "region": wanted_region, "shape": shape, "q": q,
                             "note": f"only {len(chosen)} distinct queries exist"})
@@ -259,15 +260,27 @@ for text, bits, kind, terms in exprs:
 print(f"BLAS {wanted_region} searched, {time.time() - t0:.0f}s", flush=True)
 
 
-def blas_entry(shape, q, c):
+def blas_terms(text):
+    if text.startswith("OR of all"):
+        return "ALL", list(keywords)
+    if " AND " in text:
+        return "AND", text.split(" AND ")
+    if " OR " in text:
+        return "OR", text.split(" OR ")
+    return "AND", [text]
+
+
+def blas_entry(shape, q, c, number):
     first, last = lo_g + c["lo"], lo_g + c["hi"]
-    e = {"scheme": "BLAS", "region": wanted_region, "shape": shape, "q": q, "returns": q,
-         "keyword_expression": c["text"], "time_range_ms": [BASE_MS + first, BASE_MS + last],
+    op, terms = blas_terms(c["text"])
+    e = {"scheme": "BLAS", "region": wanted_region, "shape": shape, "q": q, "set": number, "returns": q,
+         "keyword_expression": c["text"], "keyword_operator": op, "keyword_terms": terms, "time_range_ms": [BASE_MS + first, BASE_MS + last],
          "time_range": [iso_ms(BASE_MS + first), iso_ms(BASE_MS + last)],
          "matches_in_whole_region": c["matches"]}
     e.update(stats(c["o"], size))
     if "target" in c:
         e["target_position"] = c["target"]
+    e["record_ordinals"] = [int(x) + lo_g for x in c["o"]]
     return with_score(e, c["o"], q)
 
 
@@ -282,8 +295,8 @@ for shape, table in (("clustered", bcl), ("scattered", bsc)):
                 chosen.append(c)
         else:
             chosen = pick(table[q])
-        for c in chosen:
-            queries.append(blas_entry(shape, q, c))
+        for number, c in enumerate(chosen, 1):
+            queries.append(blas_entry(shape, q, c, number))
         if len(chosen) < K:
             queries.append({"scheme": "BLAS", "region": wanted_region, "shape": shape, "q": q,
                             "note": f"only {len(chosen)} distinct queries exist"})

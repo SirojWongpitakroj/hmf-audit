@@ -13,7 +13,8 @@ import time
 import numpy as np
 
 path, out = sys.argv[1], sys.argv[2]
-N = 10_000_000
+with open(path, encoding="utf-8") as _f:
+    N = sum(1 for _ in _f)
 types = np.zeros(N, np.uint8)
 leaf = np.zeros(N, np.uint32)
 counts = [0] * 5

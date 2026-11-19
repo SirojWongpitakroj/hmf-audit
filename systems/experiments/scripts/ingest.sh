@@ -60,10 +60,10 @@ fi
 declare -A MODULE=([hmf-audit]=hmf-audit [dht-backed]=dht-backed [blas]=blas [evseb]=EVBES)
 declare -A PACKAGE=([hmf-audit]=./benchmarks/latency [dht-backed]=./benchmark [blas]=./eval [evseb]=./internal/integrity)
 declare -A PATTERN=(
-    [hmf-audit]='^BenchmarkFairHMFVerificationCore$/^clustered-2$/^q=1$'
-    [dht-backed]='^BenchmarkFairDHTVerificationRequest$/^clustered-2$/^q=1$'
-    [blas]='^BenchmarkFairBLASVerificationRequest$/^clustered-2$/^q=1$'
-    [evseb]='^BenchmarkFairEVBESVerificationRequest$/^clustered-2$/^q=1$'
+    [hmf-audit]='^BenchmarkFairHMFVerificationCore$/^clustered$/^q=1$/^set=1$'
+    [dht-backed]='^BenchmarkFairDHTVerificationRequest$/^clustered$/^q=1$/^set=1$'
+    [blas]='^BenchmarkFairBLASVerificationRequest$/^clustered$/^q=1$/^set=1$'
+    [evseb]='^BenchmarkFairEVBESVerificationRequest$/^clustered$/^q=1$/^set=1$'
 )
 IFS=',' read -r -a selected <<<"$ingest_systems"
 for system in "${selected[@]}"; do
@@ -72,6 +72,7 @@ done
 
 # One execution of the smallest case; the seeding is what we want.
 begin_experiment ingest --per-region $((records / REGIONS)) --count 1 --warmup 0 --bench-time 1x
+use_native_queries
 write_environment ingest "$ingest_systems" "$RESULTS"
 
 started=$(date +%s)

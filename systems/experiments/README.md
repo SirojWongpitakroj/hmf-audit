@@ -44,8 +44,10 @@ can be pointed at a remote database.
 
 Fixed to the 10,000,000-record dataset. It checks Python + matplotlib, the
 dataset SHA-256 and Docker first, so a missing dependency fails before the long
-run rather than at the figures. Experiment 1 defaults to `hmf-audit,blas,evseb`
-(see "Known limitations"); override with `--systems` / `-Systems`. The three
+run rather than at the figures. Experiment 1 runs all four systems on the native
+clustered/scattered query sets of `native-queries/<records>/` (bash scripts only; the
+PowerShell scripts still use the older fixed placements); DHT-backed is capped at
+q = 1024 (see "Known limitations"). Override with `--systems` / `-Systems`. The three
 figures are copied to `results/spark-10000000/figures/` and the whole run is
 logged to `results/pipeline-<records>-<timestamp>.log`. Other options: count, warmup,
 bench-time, no-compare.
@@ -148,14 +150,16 @@ seeding, lower `FAIR_HMF_SEED_CONCURRENCY`.
 
 ## Known limitations
 
-* **DHT-backed fails at q = 4096 and q = 16384.** `systems/dht-backed` now has
-  working-memory bounds (`internal/cassandradht/limits.go`: 8 MiB of proof bytes
-  and 32,768 requests per call by default) that did not exist when the earlier
-  10M results were produced. At q = 4096 a request needs about 21,000 proof
-  lookups and is rejected ("proof/result map byte bound exceeded"); at q = 16384
-  it exceeds the request-count bound. Both placements fail, so experiment 1
-  stops at DHT-backed. Until this is decided, run experiment 1 with
-  `--systems hmf-audit,blas,evseb` (`-Systems hmf-audit,blas,evseb`).
+* **DHT-backed is capped at q = 2048 (so it runs q = 1..1024).** `systems/dht-backed`
+  now has working-memory bounds (`internal/cassandradht/limits.go`: 8 MiB of proof
+  bytes and 32,768 requests per call by default) that did not exist when the earlier
+  10M results were produced. With the fixed placements, q = 4096 needed about 21,000
+  proof lookups and was rejected ("proof/result map byte bound exceeded"), and
+  q = 16384 exceeded the request-count bound. Experiment 1 now measures DHT-backed
+  only up to `FAIR_DHT_MAX_Q` (default 2048); the other systems run q = 1..4096.
+  The scattered batches at q = 4096 would need about 53,800 lookups (more than both
+  bounds); the clustered ones need about 8,200 and would fit, so raising
+  `FAIR_DHT_MAX_Q` only helps if the scattered batches are skipped as well.
 * Memory: Cassandra uses about 3 GB and the fixtures several GB more. On a
   machine with little free memory, close other containers first.
 

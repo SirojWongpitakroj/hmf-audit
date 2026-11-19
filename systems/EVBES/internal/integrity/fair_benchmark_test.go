@@ -95,6 +95,25 @@ func runFairEVBES(b *testing.B, tamper bool) {
 	database, dht, setup := sharedFairEVBES(b)
 	segmentLeaves := fairEVBESSegmentLeaves(b)
 
+	// Native query sets (verification only): with FAIR_QUERY_DIR set, run the five
+	// clustered and five scattered record sets per q from the query file. The
+	// localization benchmarks keep their fixed placements.
+	if dir := os.Getenv("FAIR_QUERY_DIR"); dir != "" && !tamper {
+		cases, err := fairEVBESNativeCases(dir, setup.leafCount)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for _, c := range cases {
+			for _, set := range c.Sets {
+				b.Run(fmt.Sprintf("%s/q=%d/set=%d", c.Shape, c.Q, set.Set), func(b *testing.B) {
+					b.StopTimer()
+					runFairEVBESCase(b, ctx, database, dht, setup, set.LIDs, nil)
+				})
+			}
+		}
+		return
+	}
+
 	for _, placement := range fairEVBESPlacements {
 		for _, batchSize := range fairEVBESRequestCounts {
 			b.Run(fmt.Sprintf("%s/q=%d", placement, batchSize), func(b *testing.B) {
@@ -160,7 +179,9 @@ func runFairEVBESCase(b *testing.B, ctx context.Context, database *pgx.Conn,
 	}
 	b.ResetTimer()
 	b.ReportMetric(float64(len(candidates)), "records/op")
-	if os.Getenv("FAIR_REGION0_RECORDS") != "" {
+	if os.Getenv("FAIR_QUERY_DIR") != "" {
+		b.ReportMetric(9, "workload-version/op")
+	} else if os.Getenv("FAIR_REGION0_RECORDS") != "" {
 		b.ReportMetric(8, "workload-version/op")
 	}
 	b.ReportMetric(float64(len(candidates)), "candidate-leaves/op")
