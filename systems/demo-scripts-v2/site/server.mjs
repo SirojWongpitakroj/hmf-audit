@@ -21,7 +21,7 @@ const sourceRecords = 100000;
 const schemes = ['HMF-Audit', 'BLAS', 'DHT-backed', 'EVSEB'];
 const selected = new Set(schemes);
 const actions = {
-  verify: 'verify.ps1', tamper: 'tamper.ps1', localize: 'localize.ps1',
+  verify: 'verify.ps1', 'verify-blas': 'verify-blas.ps1', tamper: 'tamper.ps1', localize: 'localize.ps1',
   restore: 'tamper.ps1', ingest: 'ingest.ps1',
 };
 const files = {
@@ -73,6 +73,7 @@ async function persistHistory() {
 
 function emit(run, event) {
   const timedEvent = { ...event, time: Date.now() };
+  if (event.type === 'scheme') run.currentScheme = event.scheme;
   run.events.push(timedEvent);
   broadcast('progress', { id: run.id, event: timedEvent });
 }
@@ -88,6 +89,7 @@ function launch(action, args, selection, query) {
     cwd: scripts, windowsHide: true, env: { ...process.env, DEMO_EVENTS: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  Object.defineProperty(run, 'child', { value: child, enumerable: false });
   const output = createInterface({ input: child.stdout });
   const errors = createInterface({ input: child.stderr });
   const lastErrors = [];
@@ -105,7 +107,9 @@ function launch(action, args, selection, query) {
   });
   child.on('error', error => emit(run, { type: 'error', message: error.message }));
   child.on('close', async code => {
-    if (code !== 0 && !(code === 1 && ['verify', 'localize'].includes(action)) &&
+    if (run.cancelled) {
+      emit(run, { type: 'cancelled', scheme: run.currentScheme, message: 'Verification stopped by user.' });
+    } else if (code !== 0 && !(code === 1 && ['verify', 'verify-blas', 'localize'].includes(action)) &&
         !run.events.some(event => event.type === 'error' || event.status === 'ERROR')) {
       emit(run, { type: 'error', message: lastErrors.join(' ').trim() || 'The demo script stopped before completing.' });
     }
@@ -118,7 +122,7 @@ function launch(action, args, selection, query) {
       console.error('Could not save run history:', error.message);
     }
     active = null;
-    broadcast('finish', { id: run.id, code, ended: run.ended, target: await recordedTarget() });
+    broadcast('finish', { id: run.id, code, ended: run.ended, cancelled: Boolean(run.cancelled), target: await recordedTarget() });
   });
   return run;
 }
@@ -246,8 +250,8 @@ const server = createServer(async (request, response) => {
       if (target && ['ingest', 'tamper'].includes(action)) throw new Error('Restore the active tamper case first.');
       if (!target && ['localize', 'restore'].includes(action)) throw new Error('Create a tamper case first.');
       const args = [];
-      if (['verify', 'tamper'].includes(action)) args.push(...queryArgs(body.query || {}));
-      if (['verify', 'localize'].includes(action)) {
+      if (['verify', 'verify-blas', 'tamper'].includes(action)) args.push(...queryArgs(body.query || {}));
+      if (['verify', 'verify-blas', 'localize'].includes(action)) {
         if (!Number.isInteger(body.repeats) || body.repeats < 1 || body.repeats > 20) throw new Error('Runs must be between 1 and 20.');
         args.push('-Repeats', String(body.repeats));
       }
@@ -261,6 +265,29 @@ const server = createServer(async (request, response) => {
       }
       const run = launch(action, args, body.selection, body.query);
       return json(response, 202, { id: run.id });
+    }
+    if (request.method === 'POST' && route === '/api/stop') {
+      if (request.headers.origin !== 'http://' + authority || request.headers['content-type'] !== 'application/json') {
+        return json(response, 403, { error: 'Submit actions from this dashboard.' });
+      }
+      const body = await readBody(request);
+      if (!active || active.id !== body.id) return json(response, 409, { error: 'That verification is no longer running.' });
+      if (!['verify', 'verify-blas', 'localize'].includes(active.action)) {
+        return json(response, 409, { error: 'Stop is available while verification or localization is running.' });
+      }
+      if (active.cancelled) return json(response, 202, { id: active.id, stopping: true });
+      active.cancelled = true;
+      const child = active.child;
+      if (!child?.pid) {
+        active.cancelled = false;
+        return json(response, 409, { error: 'The workflow process is not ready to stop yet.' });
+      }
+      const killer = spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true, stdio: 'ignore' });
+      killer.on('error', () => child.kill());
+      killer.on('close', code => {
+        if (code !== 0 && child.exitCode === null) child.kill();
+      });
+      return json(response, 202, { id: active.id, stopping: true });
     }
     return json(response, 404, { error: 'Route not found.' });
   } catch (error) {

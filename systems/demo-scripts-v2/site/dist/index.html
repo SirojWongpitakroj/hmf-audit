@@ -28,6 +28,7 @@
     <div class="navigation">
       <nav class="tabs" aria-label="Workflows">
         <button class="tab selected" type="button" data-mode="verify" aria-pressed="true">Verification</button>
+        <button class="tab" type="button" data-mode="blas" aria-pressed="false">BLAS source</button>
         <button class="tab" type="button" data-mode="localize" aria-pressed="false">Tamper localization</button>
         <button class="tab" type="button" data-mode="ingest" aria-pressed="false">Ingestion</button>
       </nav>
@@ -61,6 +62,7 @@
           <button class="secondary" id="restore-button" type="button" hidden>Restore original log</button>
           <p class="control-note" id="tamper-note">Changes one ciphertext byte in HMF-Audit and EVSEB.</p>
         </section>
+        <button class="secondary" id="stop-button" type="button" hidden>Stop verification</button>
         <form id="ingest-form" hidden>
           <div class="panel-heading"><h2>Ingest records</h2><span class="plain-icon stack-icon" aria-hidden="true"></span></div>
           <label>Scheme <select name="selection">

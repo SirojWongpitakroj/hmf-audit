@@ -71,7 +71,7 @@ function Read-Report {
 }
 
 function Read-SourceIdentities {
-    param([string[]]$LogIds, [switch]$IncludeBlasPositions)
+    param([string[]]$LogIds, [switch]$IncludeBlasPositions, [switch]$IncludePositionIds)
     $wanted = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($id in $LogIds) {
         if (-not $wanted.Add($id)) { throw "ALL returned duplicate log ID $id." }
@@ -94,13 +94,15 @@ function Read-SourceIdentities {
     # The existing BLAS demo stable-sorts by timestamp and writes files of 128 entries.
     $sorted = @($source | Sort-Object -Property Ticks, Ordinal)
     $positions = [Collections.Generic.HashSet[string]]::new()
+    $positionIds = @{}
     for ($index = 0; $index -lt $sorted.Count; $index++) {
+        $file = [Math]::Floor($index / 128)
+        if ($IncludePositionIds) { $positionIds["$file/$($index % 128)"] = $sorted[$index].Id }
         if ($byId.ContainsKey($sorted[$index].Id)) {
-            $file = [Math]::Floor($index / 128)
             $null = $positions.Add("$file/$($index % 128)")
         }
     }
-    return [pscustomobject]@{ Ordinals = @($LogIds | ForEach-Object { $byId[$_] }); ById = $byId; Positions = $positions }
+    return [pscustomobject]@{ Ordinals = @($LogIds | ForEach-Object { $byId[$_] }); ById = $byId; Positions = $positions; PositionIds = $positionIds }
 }
 
 function New-Result {
