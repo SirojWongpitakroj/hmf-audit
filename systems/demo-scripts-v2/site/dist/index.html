@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Live verification, tamper localization and ingestion for the local Spark log demo.">
+  <title>Log Integrity</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell top-inner">
+      <a class="brand" href="/" aria-label="Log Integrity home"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span> Log Integrity</a>
+      <div id="connection" class="connection" role="status"><span></span> Connecting to local Docker</div>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="intro">
+      <div>
+        <h1>Log integrity</h1>
+        <p>Verify Spark logs, trace a tampered record, and watch the proof data build.</p>
+      </div>
+      <div class="dataset"><span class="stack-icon" aria-hidden="true"></span><div><strong>Spark dataset</strong><span id="dataset-count">Checking source…</span></div></div>
+    </section>
+
+    <div class="navigation">
+      <nav class="tabs" aria-label="Workflows">
+        <button class="tab selected" type="button" data-mode="verify" aria-pressed="true">Verification</button>
+        <button class="tab" type="button" data-mode="localize" aria-pressed="false">Tamper localization</button>
+        <button class="tab" type="button" data-mode="ingest" aria-pressed="false">Ingestion</button>
+      </nav>
+      <span class="queue" id="queue"></span>
+    </div>
+
+    <div class="dashboard">
+      <aside class="panel controls">
+        <form id="query-form">
+          <div class="panel-heading"><h2>Attribute query</h2><span class="plain-icon filter-icon" aria-hidden="true"></span></div>
+          <div class="form-grid">
+            <label>Tenant <select name="tenant" data-query-option="tenant"><option value="">All tenants</option></select></label>
+            <label>Region <select name="region" data-query-option="region" required><option value="">Choose region</option></select></label>
+          </div>
+          <label>Service <select name="service" data-query-option="service" required><option value="">Choose service</option></select></label>
+          <label>Log type <select name="logType" data-query-option="logType" required><option value="">Choose log type</option></select></label>
+          <div class="form-time">
+            <label>Start <span class="hint">inclusive</span><input class="time-field" name="start" value="2017-03-01T00:00:00Z" required autocomplete="off"></label>
+            <label>End <span class="hint">exclusive</span><input class="time-field" name="end" value="2017-12-31T00:00:00Z" required autocomplete="off"></label>
+          </div>
+          <div id="verify-controls">
+            <label class="inline-label">Timed runs <input name="repeats" type="number" min="1" max="20" value="3" required></label>
+            <button class="primary" id="verify-button" type="submit"><span class="play" aria-hidden="true"></span> Run verification</button>
+            <p class="control-note">One warm-up, then measured passes over the same batch.</p>
+          </div>
+        </form>
+        <section id="localize-controls" hidden>
+          <div class="case" id="case" hidden><span>Saved tamper case</span><code id="case-id"></code></div>
+          <button class="primary" id="tamper-button" type="button">Tamper first log</button>
+          <button class="primary" id="localize-button" type="button" hidden><span class="play" aria-hidden="true"></span> Run localization</button>
+          <button class="secondary" id="restore-button" type="button" hidden>Restore original log</button>
+          <p class="control-note" id="tamper-note">Changes one ciphertext byte in HMF-Audit and EVSEB.</p>
+        </section>
+        <form id="ingest-form" hidden>
+          <div class="panel-heading"><h2>Ingest records</h2><span class="plain-icon stack-icon" aria-hidden="true"></span></div>
+          <label>Scheme <select name="selection">
+            <option value="all">All four schemes</option>
+            <option>HMF-Audit</option><option>BLAS</option><option>DHT-backed</option><option>EVSEB</option>
+          </select></label>
+          <label class="check"><input name="replace" type="checkbox" required><span>Replace existing demo data for the selected schemes.</span></label>
+          <button class="primary" id="ingest-button" type="submit"><span class="play" aria-hidden="true"></span> Run ingestion</button>
+        </form>
+        <p id="action-error" class="error" role="alert" hidden></p>
+      </aside>
+
+      <div class="inspection">
+        <section class="flow" aria-labelledby="flow-heading">
+          <div class="flow-header">
+            <div><h2 id="flow-heading">Verification path</h2><p id="flow-description">Resolve the query through ALL and verify the matching logs.</p></div>
+            <div class="flow-state" id="flow-state"><i></i> Ready</div>
+          </div>
+          <div class="diagram">
+            <canvas id="diagram" role="img" aria-label="Animated stages of the active workflow"></canvas>
+            <div class="diagram-labels" id="diagram-labels"></div>
+          </div>
+          <div class="flow-stats" id="flow-stats"></div>
+        </section>
+
+        <div class="panels">
+          <section class="panel schemes-panel">
+            <div class="panel-heading"><h2>Schemes</h2><span id="scheme-meta" class="hint">Median latency</span></div>
+            <div id="scheme-rows"></div>
+          </section>
+          <section class="panel activity-panel">
+            <div class="panel-heading"><h2>Activity</h2><button id="replay" class="text-button" type="button" disabled><span class="replay-icon" aria-hidden="true">↻</span> Replay run</button></div>
+            <ol id="activity" aria-label="Recent run events"></ol>
+          </section>
+        </div>
+
+        <section class="panel logs-panel" id="logs-panel" hidden>
+          <div class="panel-heading"><h2>Authenticated log IDs</h2><span class="hint" id="log-count"></span></div>
+          <div id="log-rows" role="list"></div>
+          <button id="more-logs" class="text-button" type="button" hidden>Show more</button>
+        </section>
+      </div>
+    </div>
+  </main>
+</body>
+</html>
