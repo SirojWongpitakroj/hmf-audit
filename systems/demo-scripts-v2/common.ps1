@@ -125,8 +125,8 @@ function Get-DemoQuery {
         if ($Overrides.ContainsKey('Start') -or $Overrides.ContainsKey('End')) { throw 'Use -At or -Start and -End.' }
         $values.Start = $values.End = ''
     }
-    if (-not $values.Service -or -not $values.LogType -or -not $values.Region) {
-        throw 'Service, log type and region are required.'
+    if (-not $values.Tenant -or $values.Tenant -eq '*' -or -not $values.Service -or -not $values.LogType -or -not $values.Region) {
+        throw 'Tenant, service, log type and region are required (the ALL locator key starts with the tenant).'
     }
     $parseTime = {
         param([string]$Value)
@@ -146,8 +146,7 @@ function Get-DemoQuery {
     if ($lo -ge $hi) { throw 'Start must be before end.' }
     $from = $lo.ToUniversalTime().ToString('o', $culture)
     $to = $hi.ToUniversalTime().ToString('o', $culture)
-    $flags = @('-service', $values.Service, '-log-type', $values.LogType, '-region', $values.Region, '-start', $from, '-end', $to)
-    if ($values.Tenant -and $values.Tenant -ne '*') { $flags += @('-tenant', $values.Tenant) }
+    $flags = @('-tenant', $values.Tenant, '-service', $values.Service, '-log-type', $values.LogType, '-region', $values.Region, '-start', $from, '-end', $to)
     return [pscustomobject]@{
         Flags = $flags
         Description = "[$from, $to) service=$($values.Service) log-type=$($values.LogType) region=$($values.Region) tenant=$($values.Tenant)"

@@ -131,10 +131,7 @@ function queryArgs(query) {
   const args = [];
   for (const [key, flag] of [['tenant', '-Tenant'], ['service', '-Service'], ['logType', '-LogType'], ['region', '-Region']]) {
     const value = query[key];
-    if (key === 'tenant' && value === '') {
-      args.push(flag, '*');
-      continue;
-    }
+    // The ALL locator key starts with the tenant, so there is no all-tenants query.
     if (typeof value !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(value)) {
       throw new Error('Enter a valid ' + key + '.');
     }

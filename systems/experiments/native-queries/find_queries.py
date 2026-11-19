@@ -10,9 +10,10 @@ scattered: the q results are spread over as much of the region as possible, rank
 q = 1 is a single log: "clustered" picks logs from the first segments, "scattered"
 picks logs near 10%, 30%, 50%, 70% and 90% of the region.
 
-HMF-Audit query: (service, log type, region, [t_start, t_end], optional tenant).
-  A time range returns every log of that group in the range, so a window may not
-  split logs that share an event_time.
+HMF-Audit query: (tenant, service, log type, region, [t_start, t_end]); the ALL key order is
+  tenant, service, log type, region, event time, log ID, so all five attributes are required.
+  A time range returns every log of that (tenant, service, log type, region) group in the
+  range, so a window may not split logs that share an event_time.
 BLAS query: time range + keyword expression over its 16-token vocabulary (+"other").
   Fixture timestamps are 2017-01-01 + global ordinal ms, so a range is an ordinal range.
 """
@@ -119,11 +120,11 @@ queries = []
 t_all = etime[lo_g:hi_g]
 svc, typ, ten = (a[lo_g:hi_g].astype(np.int64) for a in (service, logtype, tenant))
 idx = np.arange(size, dtype=np.int64)
-families = {"no tenant": svc * 64 + typ, "with tenant": (svc * 64 + typ) * 4096 + ten}
+families = {"tenant": (svc * 64 + typ) * 4096 + ten}
 cl = {q: [] for q in QS}
 sc = {q: [] for q in QS}
 for family, key in families.items():
-    rank = 0 if family == "no tenant" else 1
+    rank = 0
     order = np.lexsort((idx, t_all, key))
     sk = key[order]
     bounds = np.r_[0, np.flatnonzero(np.diff(sk)) + 1, size]
@@ -132,10 +133,7 @@ for family, key in families.items():
         o = order[a:b]
         t = t_all[o]
         gid = int(sk[a])
-        if family == "with tenant":
-            sname, tname, tn = service_names[gid // (64 * 4096)], type_names[(gid // 4096) % 64], tenant_names[gid % 4096]
-        else:
-            sname, tname, tn = service_names[gid // 64], type_names[gid % 64], None
+        sname, tname, tn = service_names[gid // (64 * 4096)], type_names[(gid // 4096) % 64], tenant_names[gid % 4096]
         identity = (sname, tname, tn)
 
         def make(i, q, key_):
@@ -189,7 +187,7 @@ print(f"HMF-Audit {wanted_region} searched, {time.time() - t0:.0f}s", flush=True
 
 def hmf_entry(shape, q, c, number):
     e = {"scheme": "HMF-Audit", "region": wanted_region, "shape": shape, "q": q, "set": number, "returns": q,
-         "service": c["service"], "log_type": c["log_type"], "tenant": c["tenant"] or "any (no tenant filter)",
+         "service": c["service"], "log_type": c["log_type"], "tenant": c["tenant"],
          "time_range": [iso(c["start"]), iso(c["end"])], "group_size": c["group_size"]}
     e.update(stats(c["o"], size))
     if "target" in c:

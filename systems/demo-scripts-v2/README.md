@@ -15,7 +15,7 @@ From the repository root in PowerShell:
 .\systems\demo-scripts-v2\tamper.ps1 -Restore
 ```
 
-Edit `query.psd1` to change the shared default query. Both `verify.ps1` and `tamper.ps1` accept the query flags shown above. Use `-Tenant ''` for all tenants. Times are RFC 3339. The start is inclusive, the end is exclusive, and `-At` selects the following one-second interval starting at that instant.
+Edit `query.psd1` to change the shared default query. Both `verify.ps1` and `tamper.ps1` accept the query flags shown above. The tenant is required: the ALL locator key is ordered tenant, service, log type, region, time, log ID. Times are RFC 3339. The start is inclusive, the end is exclusive, and `-At` selects the following one-second interval starting at that instant.
 
 ## Verification
 

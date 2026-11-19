@@ -13,12 +13,12 @@ directory made for another dataset. Generate a new one with
 queries (the small 100k set) carry a `note` entry and run with the sets that exist.
 Experiments 2 and 3 do not use them. The result tables below are for the 10M set.
 
-Found on the pinned 10,000,000-record subset (SHA-256 `a8fa53db…`), region **R0**: 2,500,000 logs in 306 segments of 8,192 leaves. Each query returns **exactly q logs**. Five queries for each scheme, shape and q in {1, 16, 64, 256, 1024, 4096}: 120 queries. The full machine-readable list is `10000000/R0_queries.json` (HMF-Audit and BLAS, including each query's record ordinals).
+Found on the pinned 10,000,000-record subset (SHA-256 `a8fa53db…`), region **R0**: 2,500,000 logs in 306 segments of 8,192 leaves. Each query returns **exactly q logs**. Five queries for each scheme, shape and q in {1, 16, 64, 256, 1024, 4096} where they exist (HMF-Audit has none for clustered q >= 64 or scattered q = 4096). The full machine-readable list is `10000000/R0_queries.json` (HMF-Audit and BLAS, including each query's record ordinals).
 
 ## How to read it
 
 * **Shard and segment.** With one shard per region, the shard is the whole region; its 8,192-leaf segments are what "adjacent" means here. **Clustered** = all q results in one segment, or in two adjacent ones. **Scattered** = the q results spread over as much of the region as possible, ranked by span of the region x distinct segments touched / ideal (ideal = min(q, 306)). "Span" is the share of the region between the first and last result.
-* **HMF-Audit query** = (region, service, log type, time range `[from, to]`, optional tenant). A time range returns every log of the group in the range, so no window splits logs that share an event time. Tenant "any" means the new single all-tenant query.
+* **HMF-Audit query** = (tenant, service, log type, region, time range `[from, to]`); all four attributes are required because the ALL key starts with the tenant. A time range returns every log of that tenant's group in the range, so no window splits logs that share an event time. Only logs of one tenant can be returned, so large q needs a tenant with many logs: HMF-Audit has **no clustered query for q >= 64 and no scattered query for q = 4096** (empty cells).
 * **BLAS query** = time range + keyword expression over BLAS's vocabulary: the 16 most frequent tokens (`info, task, executor, stage, tid, storage, block, bytes, update, row, rdd, python, pythonrunner, init, times, total`) plus `other` for logs with none of them. The fair fixture timestamps a log as 2017-01-01 + its global ordinal in milliseconds (no log text carries a timestamp), so a BLAS time range is an ordinal range.
 * **q = 1** is one log: "clustered" takes logs from the first segments, "scattered" takes the log nearest 10%, 30%, 50%, 70% and 90% of the region.
 * **Checked against the real systems at 100k only.** Counts and positions were computed from the dataset with the same rules the fixtures use. Experiment 1 re-checks every HMF-Audit and BLAS result against the query file at run time; this has run end to end on the 100k set, not yet on the 10M set.
@@ -27,140 +27,112 @@ Found on the pinned 10,000,000-record subset (SHA-256 `a8fa53db…`), region **R
 
 | scheme | shape | q=1 | q=16 | q=64 | q=256 | q=1024 | q=4096 |
 |---|---|---|---|---|---|---|---|
-| HMF-Audit | clustered | 1/0%, 1/0%, 1/0%, 1/0%, 1/0% | 1/0%, 1/0%, 1/0%, 1/0%, 1/0% | 1/0%, 1/0%, 1/0%, 1/0%, 1/0% | 1/0%, 1/0%, 1/0%, 1/0%, 2/0% | 1/0%, 1/0%, 2/0%, 1/0%, 1/0% | 1/0%, 1/0%, 2/1%, 1/0%, 1/0% |
-| HMF-Audit | scattered | 1/0%, 1/0%, 1/0%, 1/0%, 1/0% | 12/100%, 12/99%, 13/91%, 13/91%, 13/91% | 30/99%, 30/99%, 30/98%, 31/94%, 29/99% | 56/89%, 44/55%, 52/28%, 52/28%, 50/28% | 147/65%, 145/66%, 146/66%, 146/66%, 145/66% | 65/91%, 47/70%, 4/18%, 22/8%, 7/18% |
+| HMF-Audit | clustered | 1/0%, 1/0%, 1/0%, 1/0%, 1/0% | 1/0%, 1/0%, 1/0%, 1/0%, 1/0% | none | none | none | none |
+| HMF-Audit | scattered | 1/0%, 1/0%, 1/0%, 1/0%, 1/0% | 12/99%, 13/91%, 13/91%, 13/91%, 13/91% | 30/99%, 30/99%, 30/98%, 31/94%, 29/99% | 52/28%, 52/28%, 50/28%, 50/28%, 50/28% | 147/65%, 145/66%, 146/66%, 146/66%, 145/66% | none |
 | BLAS | clustered | 1/0%, 1/0%, 1/0%, 1/0%, 1/0% | 1/0%, 1/0%, 1/0%, 1/0%, 1/0% | 1/0%, 1/0%, 1/0%, 1/0%, 1/0% | 1/0%, 1/0%, 1/0%, 1/0%, 1/0% | 1/0%, 1/0%, 1/0%, 1/0%, 1/0% | 1/0%, 1/0%, 1/0%, 1/0%, 1/0% |
 | BLAS | scattered | 1/0%, 1/0%, 1/0%, 1/0%, 1/0% | 11/17%, 11/17%, 9/20%, 9/20%, 10/17% | 13/26%, 14/17%, 14/17%, 14/17%, 14/17% | 11/34%, 11/34%, 11/34%, 16/18%, 16/18% | 20/50%, 20/50%, 20/50%, 32/27%, 32/27% | 60/88%, 61/73%, 61/73%, 35/27%, 35/27% |
 
-**Clustered:** every query sits in one segment, except one query each at HMF-Audit q = 256, 1024 and 4096, which uses two adjacent segments.
+**Clustered:** every query sits in one segment (BLAS) or in one to two adjacent segments (HMF-Audit); HMF-Audit has queries for q = 1 and 16 only.
 
-**Scattered, whole region:** HMF-Audit reaches 91–100% of the region at q = 16 and 94–99% at q = 64; at q = 256 only one query reaches 89%, at q = 1024 the best is 66%, and at q = 4096 one reaches 91%. BLAS reaches at most 88% (one query at q = 4096); at q <= 1024 its best is 50%. The reason is the data: a time range returns a whole run of one group, so exactly q results can only spread widely when the group has about q members spread across the region (HMF-Audit), and BLAS's rarest vocabulary expressions (for example `task AND pythonrunner`, 21 matches in R0) occur only early in the region.
+**Scattered, whole region:** HMF-Audit spreads are in the summary table above; its scattered cells run to q = 1024. BLAS reaches at most 88% (one query at q = 4096); at q <= 1024 its best is 50%. The reason is the data: a time range returns a whole run of one group, so exactly q results can only spread widely when the group has about q members spread across the region (HMF-Audit), and BLAS's rarest vocabulary expressions (for example `task AND pythonrunner`, 21 matches in R0) occur only early in the region.
 
 ## HMF-Audit
+
+The ALL key order is tenant, service, log type, region, event time, log ID, so an HMF-Audit query names one tenant and returns that tenant's logs of one (service, log type, region) in a time range. A cell with no row has **no query**: no (tenant, service, log type, region) group of R0 has q logs inside the shape's limits (clustered: one or two adjacent segments).
 
 ### HMF-Audit, clustered
 
 **q = 1**
 
-| # | service | log type | tenant | from | to | segments | span |
+| # | tenant | service | log type | from | to | segments | span |
 |---|---|---|---|---|---|---|---|
-| 1 | spark-executor | INFO | any | 2015-09-01T18:14:40Z | 2015-09-01T18:14:40Z | 1 (segment 0) | 0.0% |
-| 2 | spark-executor | UNSPECIFIED | any | 2015-09-01T18:14:44Z | 2015-09-01T18:14:44Z | 1 (segment 0) | 0.0% |
-| 3 | spark-executor | WARN | any | 2016-04-07T10:45:52Z | 2016-04-07T10:45:52Z | 1 (segment 0) | 0.0% |
-| 4 | spark-executor | ERROR | any | 2016-04-07T10:46:40Z | 2016-04-07T10:46:40Z | 1 (segment 0) | 0.0% |
-| 5 | spark-application-master | INFO | any | 2016-04-07T10:46:17Z | 2016-04-07T10:46:17Z | 1 (segment 0) | 0.0% |
+| 1 | T649 | spark-executor | UNSPECIFIED | 2015-09-01T18:14:40Z | 2015-09-01T18:14:40Z | 1 (segment 0) | 0.0% |
+| 2 | T780 | spark-executor | INFO | 2015-09-01T18:14:42Z | 2015-09-01T18:14:42Z | 1 (segment 0) | 0.0% |
+| 3 | T425 | spark-executor | INFO | 2015-09-01T18:14:42Z | 2015-09-01T18:14:42Z | 1 (segment 0) | 0.0% |
+| 4 | T57 | spark-executor | INFO | 2015-09-01T18:16:44Z | 2015-09-01T18:16:44Z | 1 (segment 0) | 0.0% |
+| 5 | T549 | spark-executor | INFO | 2015-09-01T18:16:46Z | 2015-09-01T18:16:46Z | 1 (segment 0) | 0.0% |
 
 **q = 16**
 
-| # | service | log type | tenant | from | to | segments | span |
+| # | tenant | service | log type | from | to | segments | span |
 |---|---|---|---|---|---|---|---|
-| 1 | spark-executor | INFO | any | 2016-11-18T22:30:09Z | 2016-11-18T22:51:12Z | 1 (segment 2) | 0.0% |
-| 2 | spark-executor | ERROR | any | 2017-02-01T19:15:40Z | 2017-02-01T19:15:41Z | 1 (segment 6) | 0.0% |
-| 3 | spark-executor | WARN | any | 2017-02-01T22:06:49Z | 2017-02-01T22:10:55Z | 1 (segment 11) | 0.0% |
-| 4 | spark-application-master | INFO | any | 2016-04-07T10:46:15Z | 2016-04-07T10:46:43Z | 1 (segment 0) | 0.0% |
-| 5 | spark-application-master | ERROR | any | 2017-03-29T10:08:40Z | 2017-03-29T10:08:56Z | 1 (segment 25) | 0.0% |
+| 1 | T435 | spark-executor | INFO | 2017-06-08T15:03:47Z | 2017-06-08T15:05:42Z | 1 (segment 122) | 0.1% |
+| 2 | T206 | spark-executor | INFO | 2017-06-09T09:16:53Z | 2017-06-09T09:24:13Z | 1 (segment 182) | 0.2% |
+| 3 | T433 | spark-executor | INFO | 2017-06-08T15:29:45Z | 2017-06-08T15:35:44Z | 1 (segment 125) | 0.2% |
+| 4 | T218 | spark-executor | INFO | 2017-06-08T10:40:29Z | 2017-06-08T10:42:27Z | 1 (segment 105) | 0.2% |
+| 5 | T140 | spark-executor | INFO | 2017-06-09T10:50:46Z | 2017-06-09T10:54:32Z | 1 (segment 192) | 0.2% |
 
 **q = 64**
 
-| # | service | log type | tenant | from | to | segments | span |
-|---|---|---|---|---|---|---|---|
-| 1 | spark-executor | INFO | any | 2016-11-18T22:49:44Z | 2016-11-18T22:53:08Z | 1 (segment 2) | 0.0% |
-| 2 | spark-application-master | INFO | any | 2016-04-07T10:46:40Z | 2016-04-07T10:49:25Z | 1 (segment 0) | 0.0% |
-| 3 | spark-application-master | ERROR | any | 2017-03-29T10:08:40Z | 2017-03-29T10:10:04Z | 1 (segment 25) | 0.0% |
-| 4 | spark-executor | ERROR | any | 2017-03-30T00:03:20Z | 2017-03-30T00:03:40Z | 1 (segment 27) | 0.0% |
-| 5 | spark-executor | WARN | any | 2017-03-30T00:20:36Z | 2017-03-30T00:22:46Z | 1 (segment 27) | 0.0% |
+No query exists for this cell.
 
 **q = 256**
 
-| # | service | log type | tenant | from | to | segments | span |
-|---|---|---|---|---|---|---|---|
-| 1 | spark-executor | INFO | any | 2016-09-09T10:06:53Z | 2016-11-18T23:01:37Z | 1 (segment 2) | 0.0% |
-| 2 | spark-application-master | INFO | any | 2016-04-07T10:46:10Z | 2016-04-07T10:52:24Z | 1 (segment 0) | 0.0% |
-| 3 | spark-executor | ERROR | any | 2017-03-30T00:27:47Z | 2017-03-30T00:29:12Z | 1 (segment 28) | 0.0% |
-| 4 | spark-application-master | WARN | any | 2017-03-30T00:01:51Z | 2017-03-30T00:41:57Z | 1 (segment 27) | 0.1% |
-| 5 | spark-executor | WARN | any | 2017-03-29T23:53:25Z | 2017-03-30T00:37:46Z | 2 (segment 27–28) | 0.4% |
+No query exists for this cell.
 
 **q = 1024**
 
-| # | service | log type | tenant | from | to | segments | span |
-|---|---|---|---|---|---|---|---|
-| 1 | spark-executor | INFO | any | 2016-09-09T10:06:53Z | 2016-11-18T23:20:48Z | 1 (segment 2) | 0.0% |
-| 2 | spark-application-master | INFO | any | 2016-04-07T10:46:15Z | 2016-04-07T11:14:16Z | 1 (segment 0) | 0.0% |
-| 3 | spark-executor | ERROR | any | 2017-03-30T00:21:41Z | 2017-03-30T00:29:13Z | 2 (segment 27–28) | 0.2% |
-| 4 | spark-executor | INFO | any | 2016-11-18T23:20:50Z | 2016-11-18T23:29:52Z | 1 (segment 2) | 0.0% |
-| 5 | spark-executor | INFO | any | 2016-11-18T23:30:02Z | 2016-11-18T23:41:42Z | 1 (segment 2) | 0.0% |
+No query exists for this cell.
 
 **q = 4096**
 
-| # | service | log type | tenant | from | to | segments | span |
-|---|---|---|---|---|---|---|---|
-| 1 | spark-executor | INFO | any | 2017-06-08T13:41:43Z | 2017-06-08T13:45:08Z | 1 (segment 115) | 0.2% |
-| 2 | spark-application-master | INFO | any | 2016-07-26T12:00:56Z | 2016-07-26T12:14:25Z | 1 (segment 1) | 0.2% |
-| 3 | spark-executor | ERROR | any | 2017-03-29T23:37:55Z | 2017-03-30T00:29:03Z | 2 (segment 27–28) | 0.5% |
-| 4 | spark-executor | INFO | any | 2017-06-08T13:50:33Z | 2017-06-08T13:54:16Z | 1 (segment 116) | 0.2% |
-| 5 | spark-executor | INFO | any | 2017-06-08T15:03:10Z | 2017-06-08T15:05:38Z | 1 (segment 122) | 0.2% |
+No query exists for this cell.
 
 ### HMF-Audit, scattered
 
 **q = 1**
 
-| # | service | log type | tenant | from | to | segments | span |
+| # | tenant | service | log type | from | to | segments | span |
 |---|---|---|---|---|---|---|---|
-| 1 | spark-executor | INFO | any | 2017-04-13T19:52:03Z | 2017-04-13T19:52:03Z | 1 (segment 29) | 0.0% |
-| 2 | spark-executor | INFO | T780 | 2017-06-07T15:12:23Z | 2017-06-07T15:12:23Z | 1 (segment 91) | 0.0% |
-| 3 | spark-executor | INFO | T453 | 2017-06-08T20:25:43Z | 2017-06-08T20:25:43Z | 1 (segment 152) | 0.0% |
-| 4 | spark-executor | INFO | T473 | 2017-06-09T13:02:16Z | 2017-06-09T13:02:16Z | 1 (segment 213) | 0.0% |
-| 5 | spark-executor | INFO | T57 | 2017-06-09T19:52:03Z | 2017-06-09T19:52:03Z | 1 (segment 274) | 0.0% |
+| 1 | T780 | spark-executor | INFO | 2017-04-13T19:52:02Z | 2017-04-13T19:52:02Z | 1 (segment 29) | 0.0% |
+| 2 | T473 | spark-executor | INFO | 2017-06-07T15:12:38Z | 2017-06-07T15:12:38Z | 1 (segment 91) | 0.0% |
+| 3 | T453 | spark-executor | INFO | 2017-06-08T20:25:43Z | 2017-06-08T20:25:43Z | 1 (segment 152) | 0.0% |
+| 4 | T533 | spark-executor | INFO | 2017-06-09T13:02:11Z | 2017-06-09T13:02:11Z | 1 (segment 213) | 0.0% |
+| 5 | T57 | spark-executor | INFO | 2017-06-09T19:52:03Z | 2017-06-09T19:52:03Z | 1 (segment 274) | 0.0% |
 
 **q = 16**
 
-| # | service | log type | tenant | from | to | segments | span |
+| # | tenant | service | log type | from | to | segments | span |
 |---|---|---|---|---|---|---|---|
-| 1 | spark-executor | UNSPECIFIED | any | 2015-09-01T18:14:44Z | 2017-07-27T21:24:56Z | 12 (segment 0–304) | 99.9% |
-| 2 | spark-executor | ERROR | T69 | 2016-07-26T12:05:04Z | 2017-07-27T21:32:50Z | 12 (segment 2–304) | 99.1% |
-| 3 | spark-application-master | INFO | T957 | 2017-03-29T19:41:19Z | 2017-07-27T11:52:15Z | 13 (segment 25–304) | 91.2% |
-| 4 | spark-application-master | INFO | T775 | 2017-03-29T21:29:00Z | 2017-07-27T14:40:28Z | 13 (segment 26–304) | 91.0% |
-| 5 | spark-application-master | INFO | T840 | 2017-03-29T19:41:46Z | 2017-06-10T15:37:27Z | 13 (segment 25–302) | 90.8% |
+| 1 | T69 | spark-executor | ERROR | 2016-07-26T12:05:04Z | 2017-07-27T21:32:50Z | 12 (segments 2-304) | 99.1% |
+| 2 | T957 | spark-application-master | INFO | 2017-03-29T19:41:19Z | 2017-07-27T11:52:15Z | 13 (segments 25-304) | 91.2% |
+| 3 | T775 | spark-application-master | INFO | 2017-03-29T21:29:00Z | 2017-07-27T14:40:28Z | 13 (segments 26-304) | 91.0% |
+| 4 | T840 | spark-application-master | INFO | 2017-03-29T19:41:46Z | 2017-06-10T15:37:27Z | 13 (segments 25-302) | 90.8% |
+| 5 | T903 | spark-application-master | INFO | 2017-03-29T23:17:01Z | 2017-07-27T14:40:22Z | 13 (segments 27-304) | 90.6% |
 
 **q = 64**
 
-| # | service | log type | tenant | from | to | segments | span |
+| # | tenant | service | log type | from | to | segments | span |
 |---|---|---|---|---|---|---|---|
-| 1 | spark-application-master | INFO | T612 | 2016-04-07T12:12:24Z | 2017-07-27T14:49:25Z | 30 (segment 0–304) | 99.4% |
-| 2 | spark-application-master | INFO | T338 | 2016-07-26T12:10:03Z | 2017-07-27T14:45:10Z | 30 (segment 1–304) | 99.2% |
-| 3 | spark-application-master | INFO | T345 | 2016-04-07T11:57:17Z | 2017-06-10T15:15:54Z | 30 (segment 0–298) | 97.6% |
-| 4 | spark-application-master | INFO | T482 | 2017-03-21T10:09:52Z | 2017-07-27T21:29:31Z | 31 (segment 17–304) | 94.0% |
-| 5 | spark-application-master | INFO | T649 | 2016-07-26T12:06:19Z | 2017-07-27T21:13:24Z | 29 (segment 1–304) | 99.3% |
+| 1 | T612 | spark-application-master | INFO | 2016-04-07T12:12:24Z | 2017-07-27T14:49:25Z | 30 (segments 0-304) | 99.4% |
+| 2 | T338 | spark-application-master | INFO | 2016-07-26T12:10:03Z | 2017-07-27T14:45:10Z | 30 (segments 1-304) | 99.2% |
+| 3 | T345 | spark-application-master | INFO | 2016-04-07T11:57:17Z | 2017-06-10T15:15:54Z | 30 (segments 0-298) | 97.6% |
+| 4 | T482 | spark-application-master | INFO | 2017-03-21T10:09:52Z | 2017-07-27T21:29:31Z | 31 (segments 17-304) | 94.0% |
+| 5 | T649 | spark-application-master | INFO | 2016-07-26T12:06:19Z | 2017-07-27T21:13:24Z | 29 (segments 1-304) | 99.3% |
 
 **q = 256**
 
-| # | service | log type | tenant | from | to | segments | span |
+| # | tenant | service | log type | from | to | segments | span |
 |---|---|---|---|---|---|---|---|
-| 1 | spark-executor | ERROR | any | 2017-04-14T01:09:47Z | 2017-06-10T15:20:40Z | 56 (segment 29–299) | 88.7% |
-| 2 | spark-executor | WARN | any | 2017-06-06T21:52:07Z | 2017-06-09T17:33:44Z | 44 (segment 84–253) | 55.3% |
-| 3 | spark-executor | INFO | T953 | 2017-06-08T21:41:07Z | 2017-06-09T12:10:15Z | 52 (segment 142–228) | 28.2% |
-| 4 | spark-executor | INFO | T413 | 2017-06-08T21:32:10Z | 2017-06-09T12:01:19Z | 52 (segment 142–228) | 28.1% |
-| 5 | spark-executor | INFO | T116 | 2017-06-08T21:49:43Z | 2017-06-09T12:20:06Z | 50 (segment 142–229) | 28.3% |
+| 1 | T953 | spark-executor | INFO | 2017-06-08T21:41:07Z | 2017-06-09T12:10:15Z | 52 (segments 142-228) | 28.2% |
+| 2 | T413 | spark-executor | INFO | 2017-06-08T21:32:10Z | 2017-06-09T12:01:19Z | 52 (segments 142-228) | 28.1% |
+| 3 | T116 | spark-executor | INFO | 2017-06-08T21:49:43Z | 2017-06-09T12:20:06Z | 50 (segments 142-229) | 28.3% |
+| 4 | T719 | spark-executor | INFO | 2017-06-08T22:08:23Z | 2017-06-09T12:19:04Z | 50 (segments 142-229) | 28.3% |
+| 5 | T706 | spark-executor | INFO | 2017-06-08T22:10:10Z | 2017-06-09T12:20:03Z | 50 (segments 142-229) | 28.3% |
 
 **q = 1024**
 
-| # | service | log type | tenant | from | to | segments | span |
+| # | tenant | service | log type | from | to | segments | span |
 |---|---|---|---|---|---|---|---|
-| 1 | spark-executor | INFO | T965 | 2017-04-13T20:56:22Z | 2017-06-09T12:17:28Z | 147 (segment 29–228) | 65.4% |
-| 2 | spark-executor | INFO | T715 | 2017-04-13T22:19:56Z | 2017-06-09T12:45:57Z | 145 (segment 29–231) | 66.2% |
-| 3 | spark-executor | INFO | T951 | 2017-04-13T20:57:18Z | 2017-06-09T12:20:37Z | 146 (segment 29–229) | 65.6% |
-| 4 | spark-executor | INFO | T773 | 2017-04-13T20:57:18Z | 2017-06-09T12:19:04Z | 146 (segment 29–229) | 65.5% |
-| 5 | spark-executor | INFO | T397 | 2017-04-13T22:06:57Z | 2017-06-09T12:54:30Z | 145 (segment 29–229) | 65.8% |
+| 1 | T965 | spark-executor | INFO | 2017-04-13T20:56:22Z | 2017-06-09T12:17:28Z | 147 (segments 29-228) | 65.4% |
+| 2 | T715 | spark-executor | INFO | 2017-04-13T22:19:56Z | 2017-06-09T12:45:57Z | 145 (segments 29-231) | 66.2% |
+| 3 | T951 | spark-executor | INFO | 2017-04-13T20:57:18Z | 2017-06-09T12:20:37Z | 146 (segments 29-229) | 65.6% |
+| 4 | T773 | spark-executor | INFO | 2017-04-13T20:57:18Z | 2017-06-09T12:19:04Z | 146 (segments 29-229) | 65.5% |
+| 5 | T397 | spark-executor | INFO | 2017-04-13T22:06:57Z | 2017-06-09T12:54:30Z | 145 (segments 29-229) | 65.8% |
 
 **q = 4096**
 
-| # | service | log type | tenant | from | to | segments | span |
-|---|---|---|---|---|---|---|---|
-| 1 | spark-executor | ERROR | any | 2017-03-29T23:42:16Z | 2017-07-27T15:16:09Z | 65 (segment 27–304) | 90.8% |
-| 2 | spark-application-master | INFO | any | 2017-06-06T22:05:02Z | 2017-06-10T15:26:33Z | 47 (segment 86–301) | 70.5% |
-| 3 | spark-executor | INFO | any | 2017-04-13T23:55:05Z | 2017-05-02T14:35:05Z | 4 (segment 29–82) | 17.5% |
-| 4 | spark-executor | ERROR | any | 2015-09-01T18:19:50Z | 2017-03-29T17:26:48Z | 22 (segment 0–25) | 8.4% |
-| 5 | spark-application-master | INFO | any | 2017-03-29T23:41:08Z | 2017-04-13T21:26:32Z | 7 (segment 26–80) | 17.6% |
+No query exists for this cell.
 
 ## BLAS
 
