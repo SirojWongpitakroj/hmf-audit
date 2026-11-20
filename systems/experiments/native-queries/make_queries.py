@@ -29,6 +29,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dataset", required=True, help="the benchmark subset (JSONL, regions grouped R0, R1, ...)")
     parser.add_argument("--out", required=True, help="directory for the two query files")
+    parser.add_argument("--shards-per-region", type=int, default=4,
+                        help="HMF-Audit shards per region (must match FAIR_HMF_SHARDS_PER_REGION of the run)")
     args = parser.parse_args()
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -36,7 +38,8 @@ def main() -> None:
     try:
         run(str(HERE / "parse_dataset.py"), args.dataset, str(scratch / "arrays.npz"))
         run(str(HERE / "map_dht_leaves.py"), args.dataset, str(scratch / "leaves.npz"))
-        run(str(HERE / "find_queries.py"), str(scratch / "arrays.npz"), str(out / "R0_queries.json"), "R0")
+        run(str(HERE / "find_queries.py"), str(scratch / "arrays.npz"), str(out / "R0_queries.json"), "R0",
+            str(args.shards_per_region))
         run(str(HERE / "find_tree_queries.py"), str(scratch / "leaves.npz"), str(out / "dht_evseb_queries.json"))
     finally:
         shutil.rmtree(scratch, ignore_errors=True)

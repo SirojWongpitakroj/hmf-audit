@@ -4,7 +4,11 @@ Positions are region-local ordinals; segment = ordinal // 8192 (one shard per
 region, so the shard is the whole region and its segments are the 8,192-leaf
 trees). Every query returns EXACTLY q logs.
 
-clustered: all q results lie in one segment (preferred) or in two adjacent ones.
+clustered: all q results lie in one segment (preferred) or in two adjacent ones (q = 4096: up to
+           four adjacent ones: 4,096 records of a tenant that owns a fifth of the region need ~2.6 segments).
+           Segments belong to a shard: with SHARDS shards per region (argv[4]) a region is split into SHARDS
+           contiguous shards of near-equal size, each with its own 8,192-leaf segments, and segments of
+           different shards are never adjacent (exactly the layout of benchmarks/latency/fixture.go).
 scattered: the q results are spread over as much of the region as possible, ranked
            by span/region x distinct segments/ideal (ideal = min(q, segments)).
 q = 1 is a single log: "clustered" picks logs from the first segments, "scattered"
@@ -14,6 +18,11 @@ HMF-Audit query: (tenant, service, log type, region, [t_start, t_end]); the ALL 
   tenant, service, log type, region, event time, log ID, so all five attributes are required.
   A time range returns every log of that (tenant, service, log type, region) group in the
   range, so a window may not split logs that share an event_time.
+  Where no single (tenant, service, log type, region) group has a run of exactly q logs
+  in the shape (HMF-Audit clustered q >= 64, scattered q = 4096), the query is a batch of
+  several such ranges ("ranges": one per group, each with its own tenant and time range)
+  whose results together are exactly q logs and satisfy the shape. HMF-Audit resolves and
+  verifies every range, joins the addresses, and proves them with one HPP proof.
 BLAS query: time range + keyword expression over its 16-token vocabulary (+"other").
   Fixture timestamps are 2017-01-01 + global ordinal ms, so a range is an ordinal range.
 """
@@ -26,8 +35,11 @@ import time
 import numpy as np
 
 LEAVES = 8192
+SHARDS = int(sys.argv[4]) if len(sys.argv) > 4 else 1   # HMF-Audit shards per region
+CLUSTER_SEGMENTS = {4096: 4}   # clustered = at most this many adjacent segments (default 2)
 QS = (1, 16, 64, 256, 1024, 4096)
 K = 5
+MAX_RANGES = 256  # most ALL ranges one HMF-Audit batch may use
 TARGETS = (0.1, 0.3, 0.5, 0.7, 0.9)
 arrays = np.load(sys.argv[1])
 out_path, wanted_region = sys.argv[2], sys.argv[3]
@@ -68,9 +80,13 @@ def sliding_minmax(a, q):
     return np.minimum(suf_lo[:m], pre_lo[q - 1:q - 1 + m]), np.maximum(suf_hi[:m], pre_hi[q - 1:q - 1 + m])
 
 
-def spread(o, q, size, nseg):
+def plain_seg(o):
+    return o // LEAVES
+
+
+def spread(o, q, size, nseg, seg=plain_seg):
     """How much of the region the q results cover: span / region x distinct segments / ideal."""
-    d = len(np.unique(o // LEAVES))
+    d = len(np.unique(seg(o)))
     return (float(o.max() - o.min()) / size) * (d / min(q, nseg)), d
 
 
@@ -95,15 +111,21 @@ def pick(cands, k=K):
     return chosen
 
 
-def stats(o, size):
-    seg = o // LEAVES
-    return {"segments_touched": int(len(np.unique(seg))), "first_segment": int(seg.min()), "last_segment": int(seg.max()),
-            "first_ordinal": int(o.min()), "last_ordinal": int(o.max()),
-            "span_fraction_of_region": round(float(o.max() - o.min()) / size, 4)}
+def stats(o, size, hmf=False):
+    seg = hmf_seg(o) if hmf else plain_seg(o)
+    out = {"segments_touched": int(len(np.unique(seg))), "first_segment": int(seg.min()), "last_segment": int(seg.max()),
+           "first_ordinal": int(o.min()), "last_ordinal": int(o.max()),
+           "span_fraction_of_region": round(float(o.max() - o.min()) / size, 4)}
+    if hmf:
+        out["shards_touched"] = int(len(np.unique(shard_of(o))))
+    return out
 
 
-def with_score(e, o, q):
-    e["spread_score"] = round(spread(o, q, size, nseg)[0], 4)
+def with_score(e, o, q, hmf=False):
+    if hmf:
+        e["spread_score"] = round(spread(o, q, size, nseg, hmf_seg)[0], 4)
+    else:
+        e["spread_score"] = round(spread(o, q, size, nseg_blas)[0], 4)
     return e
 
 
@@ -112,7 +134,30 @@ ends = np.r_[starts[1:], len(region)]
 rid = region_names.index(wanted_region)
 lo_g, hi_g = next((int(s), int(e)) for s, e in zip(starts, ends) if int(region[s]) == rid)
 size = hi_g - lo_g
-nseg = (size + LEAVES - 1) // LEAVES
+nseg_blas = (size + LEAVES - 1) // LEAVES   # BLAS's statistics keep the one-shard segment numbering
+shard_base, shard_extra = divmod(size, SHARDS)
+shard_off = np.array([k * shard_base + min(k, shard_extra) for k in range(SHARDS + 1)], dtype=np.int64)
+shard_nseg = (np.diff(shard_off) + LEAVES - 1) // LEAVES
+seg_start = np.r_[0, np.cumsum(shard_nseg)[:-1]].astype(np.int64)
+nseg = int(shard_nseg.sum())                # HMF-Audit segments of the region, all shards
+
+
+def shard_of(o):
+    return np.searchsorted(shard_off[1:], o, side="right")
+
+
+def hmf_seg(o):
+    """Flat segment number of region-local ordinals (shard by shard)."""
+    k = shard_of(o)
+    return seg_start[k] + (o - shard_off[k]) // LEAVES
+
+
+def hmf_gid(o):
+    """Like hmf_seg, with a gap between shards: ids differ by 1 only for adjacent segments of one shard."""
+    return hmf_seg(o) + shard_of(o)
+
+
+max_gid = int(hmf_gid(np.array([size - 1]))[0])
 t0 = time.time()
 queries = []
 
@@ -162,8 +207,8 @@ for family, key in families.items():
                 continue
             lo_o, hi_o = sliding_minmax(o, q)
             span = hi_o - lo_o
-            seg_diff = hi_o // LEAVES - lo_o // LEAVES
-            good = np.flatnonzero(ok & (seg_diff <= 1))
+            seg_diff = hmf_gid(hi_o) - hmf_gid(lo_o)
+            good = np.flatnonzero(ok & (seg_diff <= CLUSTER_SEGMENTS.get(q, 2) - 1))
             if len(good):
                 picked = []
                 for i in good[np.lexsort((good, span[good], seg_diff[good]))][:4000]:
@@ -174,7 +219,7 @@ for family, key in families.items():
                             break
             cand = np.flatnonzero(ok)
             top = cand[np.argsort(-span[cand], kind="stable")[:60]]
-            scored = sorted(((*spread(o[i: i + q], q, size, nseg), int(i)) for i in top), reverse=True)
+            scored = sorted(((*spread(o[i: i + q], q, size, nseg, hmf_seg), int(i)) for i in top), reverse=True)
             picked = []
             for score, distinct, i in scored:
                 if all(abs(i - j) >= q for j in picked):
@@ -189,11 +234,139 @@ def hmf_entry(shape, q, c, number):
     e = {"scheme": "HMF-Audit", "region": wanted_region, "shape": shape, "q": q, "set": number, "returns": q,
          "service": c["service"], "log_type": c["log_type"], "tenant": c["tenant"],
          "time_range": [iso(c["start"]), iso(c["end"])], "group_size": c["group_size"]}
-    e.update(stats(c["o"], size))
+    e.update(stats(c["o"], size, hmf=True))
     if "target" in c:
         e["target_position"] = c["target"]
     e["record_ordinals"] = sorted(int(x) + lo_g for x in c["o"])
-    return with_score(e, c["o"], q)
+    return with_score(e, c["o"], q, hmf=True)
+
+
+# ---- HMF-Audit batches of several ranges (cells with no single-range query) ----------
+pos_o = order                                   # region-local ordinal, in (group, time) order
+pos_t = t_all[order]
+group_of = np.repeat(np.arange(len(bounds) - 1), np.diff(bounds))
+group_lo, group_hi = bounds[:-1], bounds[1:]
+pos_seg = hmf_gid(pos_o)
+
+
+def component(i, j):
+    """The window of positions [i, j) of one group, as one ALL range."""
+    gid = int(sk[i])
+    return {"service": service_names[gid // (64 * 4096)], "log_type": type_names[(gid // 4096) % 64],
+            "tenant": tenant_names[gid % 4096], "start": int(pos_t[i]), "end": int(pos_t[j - 1]),
+            "n": j - i, "o": pos_o[i:j].copy()}
+
+
+def clustered_batch(segments, q):
+    """q logs, all in `segments`, as ranges of whole runs of group members in time order.
+    A run may not start or end between logs that share an event time."""
+    inside = np.isin(pos_seg, segments)
+    first = inside & ~(np.r_[False, inside[:-1]] & np.r_[False, group_of[1:] == group_of[:-1]])
+    last = inside & ~(np.r_[inside[1:], False] & np.r_[group_of[1:] == group_of[:-1], False])
+    runs = []
+    for a, b in zip(np.flatnonzero(first), np.flatnonzero(last) + 1):
+        g = group_of[a]
+        lo, hi = int(group_lo[g]), int(group_hi[g])
+        while a < b and a > lo and pos_t[a - 1] == pos_t[a]:
+            a += 1
+        while a < b and b < hi and pos_t[b] == pos_t[b - 1]:
+            b -= 1
+        if a < b:
+            runs.append((int(b - a), int(a), int(b), lo, hi))
+    if sum(r[0] for r in runs) < q:
+        return None
+    runs.sort(key=lambda r: (-r[0], r[1]))
+    chosen, total, rest = [], 0, []
+    for run in runs:
+        if total + run[0] <= q:
+            chosen.append(component(run[1], run[2]))
+            total += run[0]
+        else:
+            rest.append(run)
+        if total == q or len(chosen) > MAX_RANGES:
+            break
+    if total < q:
+        need = q - total                       # one more window of exactly `need` logs
+        for length, a, b, lo, hi in (r for r in rest if r[0] >= need):
+            i = np.arange(a, b - need + 1)
+            j = i + need
+            ok = ((i == lo) | (pos_t[i] != pos_t[i - 1])) & ((j == hi) | (pos_t[j - 1] != pos_t[np.minimum(j, size - 1)]))
+            hit = np.flatnonzero(ok)
+            if len(hit):
+                chosen.append(component(int(i[hit[0]]), int(i[hit[0]]) + need))
+                total = q
+                break
+    if total != q or len(chosen) > MAX_RANGES:
+        return None
+    return chosen
+
+
+def multi_clustered(q, count):
+    """`count` batches of q logs, each inside one segment or two adjacent ones; fewest ranges first."""
+    options = []
+    width = CLUSTER_SEGMENTS.get(q, 2)
+    for segment in range(max_gid + 1):
+        for segments in (tuple(range(segment, segment + w)) for w in (1, width)):
+            if segments[-1] > max_gid:
+                continue
+            batch = clustered_batch(segments, q)
+            if batch is not None:
+                touched = len(np.unique(hmf_gid(np.concatenate([c["o"] for c in batch]))))
+                options.append(((touched, len(batch), segment), segments, batch))
+    options.sort(key=lambda x: x[0])
+    chosen, used = [], set()
+    for _, segments, batch in options:
+        if used.isdisjoint(segments):
+            chosen.append(batch)
+            used.update(segments)
+            if len(chosen) == count:
+                break
+    return chosen
+
+
+def multi_scattered(q, count):
+    """`count` batches of q logs spread over the region: ranges of the best scattered
+    windows of a smaller size, from different groups, chosen to maximise the spread."""
+    part = max((b for b in QS if b < q and len(sc[b]) >= q // b), default=None)
+    if part is None or q % part:
+        return []
+    need = q // part
+    pool = sorted(sc[part], key=lambda c: c["key"])
+    chosen, used = [], set()
+    for _ in range(count):
+        batch, groups = [], set()
+        for _ in range(need):
+            best = None
+            for c in (c for c in pool[:200] if c["identity"] not in used and c["identity"] not in groups):
+                union = np.concatenate([x["o"] for x in batch] + [c["o"]])
+                if len(np.unique(union)) != len(union):
+                    continue
+                score = spread(union, len(union), size, nseg, hmf_seg)[0]
+                if best is None or score > best[0]:
+                    best = (score, c)
+            if best is None:
+                break
+            batch.append(best[1])
+            groups.add(best[1]["identity"])
+        if len(batch) < need:
+            break
+        used |= groups
+        chosen.append([{"service": c["service"], "log_type": c["log_type"], "tenant": c["tenant"],
+                        "start": c["start"], "end": c["end"], "n": part, "o": c["o"]} for c in batch])
+    return chosen
+
+
+def hmf_batch_entry(shape, q, number, batch):
+    o = np.concatenate([c["o"] for c in batch])
+    assert len(o) == q and len(np.unique(o)) == q
+    e = {"scheme": "HMF-Audit", "region": wanted_region, "shape": shape, "q": q, "set": number, "returns": q,
+         "range_count": len(batch),
+         "ranges": [{"tenant": c["tenant"], "service": c["service"], "log_type": c["log_type"],
+                     "time_range": [iso(c["start"]), iso(c["end"])], "returns": int(c["n"])} for c in batch]}
+    e.update(stats(o, size, hmf=True))
+    e["record_ordinals"] = sorted(int(x) + lo_g for x in o)
+    return with_score(e, o, q, hmf=True)
+
 
 
 for shape, table in (("clustered", cl), ("scattered", sc)):
@@ -209,6 +382,13 @@ for shape, table in (("clustered", cl), ("scattered", sc)):
             chosen = pick(table[q])
         for number, c in enumerate(chosen, 1):
             queries.append(hmf_entry(shape, q, c, number))
+        if not chosen:                                       # no single group has q logs in this shape
+            batches = (multi_clustered if shape == "clustered" else multi_scattered)(q, K)
+            for number, batch in enumerate(batches, 1):
+                queries.append(hmf_batch_entry(shape, q, number, batch))
+            print(f"HMF-Audit {shape} q={q}: {len(batches)} multi-range batches, "
+                  f"ranges per batch {[len(b) for b in batches]}", flush=True)
+            chosen = batches
         if len(chosen) < K:
             queries.append({"scheme": "HMF-Audit", "region": wanted_region, "shape": shape, "q": q,
                             "note": f"only {len(chosen)} distinct queries exist"})
@@ -253,7 +433,7 @@ for text, bits, kind, terms in exprs:
             i = int(good[np.lexsort((good, span[good], seg_diff[good]))[0]])
             bcl[q].append(make(i, q, (int(seg_diff[i]), terms, int(span[i]))))
         top = np.argsort(-span, kind="stable")[:40]
-        score, distinct, i = max((*spread(h[j: j + q], q, size, nseg), int(j)) for j in top)
+        score, distinct, i = max((*spread(h[j: j + q], q, size, nseg_blas), int(j)) for j in top)
         bsc[q].append(make(i, q, (-round(score, 4), -distinct, terms)))
 print(f"BLAS {wanted_region} searched, {time.time() - t0:.0f}s", flush=True)
 
@@ -300,5 +480,5 @@ for shape, table in (("clustered", bcl), ("scattered", bsc)):
                             "note": f"only {len(chosen)} distinct queries exist"})
 
 with open(out_path, "w", encoding="utf-8") as f:
-    json.dump({"region": wanted_region, "records": size, "segments": nseg, "queries": queries}, f, indent=1)
+    json.dump({"region": wanted_region, "records": size, "segments": nseg, "shards_per_region": SHARDS, "queries": queries}, f, indent=1)
 print("wrote", out_path, f"{time.time() - t0:.0f}s", flush=True)
