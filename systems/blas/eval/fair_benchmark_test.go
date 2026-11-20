@@ -29,10 +29,48 @@ var fairBLASBatchSizes = []int{1, 16, 64, 256, 1024, 4096}
 var fairBLASPlacements = []string{"clustered-2", "scattered"}
 
 type fairBLASDatasetRecord struct {
-	SourceID string `json:"source_id"`
-	RawLog   string `json:"raw_log"`
-	RegionID string `json:"region_id"`
-	TenantID string `json:"tenant_id"`
+	SourceID  string `json:"source_id"`
+	RawLog    string `json:"raw_log"`
+	RegionID  string `json:"region_id"`
+	TenantID  string `json:"tenant_id"`
+	ServiceID string `json:"service_id"`
+	LogType   string `json:"log_type"`
+	EventTime string `json:"event_time"`
+}
+
+// BLAS identifies a log by keywords only, so the attributes an HMF-Audit query names (tenant,
+// service, log type, region) are stored as keywords of every entry, next to the vocabulary tokens:
+// "tenant=T3", "service=spark-executor", "type=INFO", "region=R0". A BLAS query for the same group is
+// the AND of the four and a time range, which is what an HMF-Audit range query selects. The values are
+// the dataset's own fields, the ones the HMF-Audit locator indexes. FAIR_BLAS_ATTRIBUTES=0 leaves
+// them out (the original fixture).
+const (
+	fairBLASTenantPrefix  = "tenant="
+	fairBLASServicePrefix = "service="
+	fairBLASTypePrefix    = "type="
+	fairBLASRegionPrefix  = "region="
+)
+
+func fairBLASAttributesEnabled() bool { return os.Getenv("FAIR_BLAS_ATTRIBUTES") != "0" }
+
+func fairBLASAttributeKeywords(input fairBLASDatasetRecord) []string {
+	if !fairBLASAttributesEnabled() {
+		return nil
+	}
+	return []string{
+		fairBLASTenantPrefix + input.TenantID, fairBLASServicePrefix + input.ServiceID,
+		fairBLASTypePrefix + input.LogType, fairBLASRegionPrefix + input.RegionID,
+	}
+}
+
+// fairBLASIsAttributeKeyword reports whether a query term is one of the attribute keywords.
+func fairBLASIsAttributeKeyword(term string) bool {
+	for _, prefix := range []string{fairBLASTenantPrefix, fairBLASServicePrefix, fairBLASTypePrefix, fairBLASRegionPrefix} {
+		if len(term) > len(prefix) && term[:len(prefix)] == prefix {
+			return true
+		}
+	}
+	return false
 }
 
 // legacyFairBLASAuditorVerificationCore is retained only while older result

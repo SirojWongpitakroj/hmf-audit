@@ -1,7 +1,6 @@
 package eval
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/gob"
@@ -377,8 +376,10 @@ func buildAndPersistFairBLAS(ctx context.Context, database *pgx.Conn, cfg Config
 		return nil, err
 	}
 	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 4<<20)
+	scanner, err := fairBLASRecordsOf(file, total)
+	if err != nil {
+		return nil, err
+	}
 
 	logChain, err := chain.NewChainWithOptions(cfg.Fanout, cfg.SegmentSize, cfg.UseAggregation)
 	if err != nil {
@@ -400,8 +401,12 @@ func buildAndPersistFairBLAS(ctx context.Context, database *pgx.Conn, cfg Config
 			return err
 		}
 		keywords := append(fairBLASKeywords(vocabulary, input.RawLog), batchKeywords[ordinal]...)
-		if _, err := builder.AddEntry(fairBLASTimestamp(input.RawLog, ordinal),
-			keywords, []byte(input.RawLog)); err != nil {
+		keywords = append(keywords, fairBLASAttributeKeywords(input)...)
+		stamp, err := fairBLASRecordTime(input, ordinal)
+		if err != nil {
+			return err
+		}
+		if _, err := builder.AddEntry(stamp, keywords, []byte(input.RawLog)); err != nil {
 			return err
 		}
 		ordinal++

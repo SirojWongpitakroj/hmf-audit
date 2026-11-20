@@ -35,6 +35,8 @@ func fairBLASNativeScenarios(dir string, vocabulary []string) ([]fairBLASScenari
 			Terms          []string `json:"keyword_terms"`
 			TimeRangeMS    []int64  `json:"time_range_ms"`
 			RecordOrdinals []int    `json:"record_ordinals"`
+			Layout         string   `json:"layout"`
+			RecordTimesMS  []int64  `json:"record_times_ms"`
 			Note           string   `json:"note"`
 		} `json:"queries"`
 	}
@@ -58,7 +60,7 @@ func fairBLASNativeScenarios(dir string, vocabulary []string) ([]fairBLASScenari
 			return nil, fmt.Errorf("BLAS %s q=%d set %d: malformed query", entry.Shape, entry.Q, entry.Set)
 		}
 		for _, term := range entry.Terms {
-			if !known[term] {
+			if !known[term] && !fairBLASIsAttributeKeyword(term) {
 				return nil, fmt.Errorf("BLAS %s q=%d set %d: keyword %q is not in this dataset's vocabulary (wrong query directory?)",
 					entry.Shape, entry.Q, entry.Set, term)
 			}
@@ -67,9 +69,25 @@ func fairBLASNativeScenarios(dir string, vocabulary []string) ([]fairBLASScenari
 		if err != nil {
 			return nil, err
 		}
+		// A query set for the attribute fixture lists the event time of every record it must return
+		// ("layout": "event_time"); the original sets list ordinals, which are timestamps of the
+		// original fixture. Mixing them would compare different clocks, so it is refused.
+		eventTime := entry.Layout == "event_time"
+		if eventTime != fairBLASAttributesEnabled() {
+			return nil, fmt.Errorf("BLAS %s q=%d set %d: this query set is for the %s fixture, but the %s fixture is selected (FAIR_BLAS_ATTRIBUTES)",
+				entry.Shape, entry.Q, entry.Set, map[bool]string{true: "event-time", false: "ordinal-timestamp"}[eventTime],
+				map[bool]string{true: "event-time", false: "ordinal-timestamp"}[fairBLASAttributesEnabled()])
+		}
 		expected := make([]int64, len(entry.RecordOrdinals))
-		for index, ordinal := range entry.RecordOrdinals {
-			expected[index] = fairBLASBaseMillis + int64(ordinal)
+		if eventTime {
+			if len(entry.RecordTimesMS) != entry.Q {
+				return nil, fmt.Errorf("BLAS %s q=%d set %d: record_times_ms lists %d times", entry.Shape, entry.Q, entry.Set, len(entry.RecordTimesMS))
+			}
+			copy(expected, entry.RecordTimesMS)
+		} else {
+			for index, ordinal := range entry.RecordOrdinals {
+				expected[index] = fairBLASBaseMillis + int64(ordinal)
+			}
 		}
 		key := cell{entry.Shape, entry.Q}
 		cells[key] = append(cells[key], fairBLASScenario{

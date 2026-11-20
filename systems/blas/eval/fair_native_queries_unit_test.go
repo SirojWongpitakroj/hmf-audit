@@ -7,6 +7,8 @@ import (
 )
 
 func TestFairBLASNativeScenarios(t *testing.T) {
+	// The file below lists ordinals, the timestamps of the original (ordinal) fixture.
+	t.Setenv("FAIR_BLAS_ATTRIBUTES", "0")
 	dir := t.TempDir()
 	file := `{"queries":[
 	 {"scheme":"HMF-Audit","shape":"clustered","q":1,"set":1,"record_ordinals":[1]},
