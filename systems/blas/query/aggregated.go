@@ -6,6 +6,7 @@ import (
 	"blas/alis"
 	"blas/bhash"
 	"blas/bitmap"
+	"blas/chain"
 	"blas/optimize"
 )
 
@@ -31,14 +32,37 @@ type AggregatedLGBinding struct {
 // not the LG-run neighbour completeness evidence, which still needs each
 // block's own transaction-level OMT root).
 func (fn *FullNode) Stage2Aggregated(qon QOn, s1 Stage1Result) (Stage2Result, map[uint64]AggregatedLGBinding, error) {
-	segs := fn.Chain.Segments()
 	bindings := map[uint64]AggregatedLGBinding{}
+	segs := map[uint64]*chain.Segment{}
+	// loadSegments adds the segments with the given indexes that are not loaded yet; a segment is
+	// read once per request even when Stage 1 and several candidate blocks use it.
+	loadSegments := func(indexes []uint64) error {
+		var missing []uint64
+		for _, index := range indexes {
+			if _, ok := segs[index]; !ok {
+				segs[index] = nil
+				missing = append(missing, index)
+			}
+		}
+		loaded, err := fn.segments(missing)
+		if err != nil {
+			return err
+		}
+		for i, index := range missing {
+			segs[index] = loaded[i]
+		}
+		return nil
+	}
 
+	stage1Segments := make([]uint64, len(s1.Segments))
+	for i, segRes := range s1.Segments {
+		stage1Segments[i] = segRes.SegmentBase / fn.SegmentSize()
+	}
+	if err := loadSegments(stage1Segments); err != nil {
+		return Stage2Result{}, nil, err
+	}
 	for _, segRes := range s1.Segments {
 		segIndex := segRes.SegmentBase / fn.SegmentSize()
-		if segIndex >= uint64(len(segs)) {
-			return Stage2Result{}, nil, fmt.Errorf("query: segment index %d out of range", segIndex)
-		}
 		seg := segs[segIndex]
 		if seg.AggLGIIMT == nil {
 			return Stage2Result{}, nil, fmt.Errorf("query: segment %d has no aggregated LG IIMT (Optimization 2 not enabled on this chain?)", segIndex)
@@ -62,19 +86,26 @@ func (fn *FullNode) Stage2Aggregated(qon QOn, s1 Stage1Result) (Stage2Result, ma
 	}
 
 	var res Stage2Result
-	blocks := fn.Chain.Blocks()
-	for _, h := range s1.CandidateHeights {
-		if h >= uint64(len(blocks)) {
-			return Stage2Result{}, nil, fmt.Errorf("query: candidate height %d out of range", h)
-		}
-		segIndex := h / fn.SegmentSize()
+	blocks, err := fn.blocks(s1.CandidateHeights)
+	if err != nil {
+		return Stage2Result{}, nil, err
+	}
+	candidateSegments := make([]uint64, len(s1.CandidateHeights))
+	for i, h := range s1.CandidateHeights {
+		candidateSegments[i] = h / fn.SegmentSize()
+	}
+	if err := loadSegments(candidateSegments); err != nil {
+		return Stage2Result{}, nil, err
+	}
+	for i, h := range s1.CandidateHeights {
+		segIndex := candidateSegments[i]
 		seg := segs[segIndex]
 		aggTree, ok := seg.LGAggTrees[qon.LG]
 		if !ok {
 			return Stage2Result{}, nil, fmt.Errorf("query: no generator-aggregation tree for lid %d in segment %d", qon.LG, segIndex)
 		}
 		aggIndex := seg.LGAggIndex[qon.LG]
-		b := blocks[h]
+		b := blocks[i]
 		vo, err := alis.ProcessTxLevelQueryAggregated(b.TxIndex, b.Transactions, h, aggTree, aggIndex, alis.TxQuery{
 			LG: qon.LG, FK: qon.FK, HasRange: qon.HasRange, TS: qon.TS, TE: qon.TE,
 		})

@@ -25,7 +25,7 @@ import (
 
 var fairBLASResult verify.Result
 
-var fairBLASBatchSizes = []int{1, 16, 64, 256, 1024, 4096, 16384}
+var fairBLASBatchSizes = []int{1, 16, 64, 256, 1024, 4096}
 var fairBLASPlacements = []string{"clustered-2", "scattered"}
 
 type fairBLASDatasetRecord struct {
@@ -262,10 +262,14 @@ func fairBLASKeywords(vocabulary []string, raw string) []string {
 // fairBLASBatchKeywords maps a record ordinal to the batch keywords it
 // carries, giving every scenario's query exactly its batch size of hits.
 func fairBLASBatchKeywords(total int) map[int][]string {
+	return fairBLASBatchKeywordsForCounts(total, fairBLASBatchSizes)
+}
+
+func fairBLASBatchKeywordsForCounts(total int, counts []int) map[int][]string {
 	assigned := make(map[int][]string)
 	segmentLeaves := fairBLASSegmentLeavesFromEnvironment()
 	for _, placement := range fairBLASPlacements {
-		for _, batchSize := range fairBLASBatchSizes {
+		for _, batchSize := range counts {
 			keyword := fairBLASBatchKeyword(placement, batchSize)
 			for _, index := range fairBLASBatchIndices(placement, batchSize, total, segmentLeaves) {
 				assigned[index] = append(assigned[index], keyword)

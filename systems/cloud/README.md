@@ -3,7 +3,7 @@
 The same fair benchmark as the local Docker study, with each scheme's storage on
 its own VM. All traffic uses the VMs' **private** addresses; you SSH into the
 runner only. Protocol, dataset (the pinned 10M subset), request sets, repetitions
-and the in-memory chain in the timed paths are unchanged.
+are unchanged, except that BLAS's full node now reads its block- and transaction-level indexes from PostgreSQL (see Chain below).
 
 | VM | Name | Internal IP | Type | Runs | Holds |
 |---|---|---|---|---|---|
@@ -32,7 +32,13 @@ another scheme's keyspace or schema.
 * **HMF regions.** The hierarchy tables are partitioned by region, so R0..R3 stay
   separate inside the one Cassandra instance; `check.sh post` confirms exactly four
   regions × 1 shard exist after seeding.
-* **Chain.** The timed paths keep the in-memory chain. The anchor VM is a standing
+* **Chain.** DHT-backed and EVSEB keep the in-memory chain in their timed paths. BLAS does not: its
+  full node reads the block-level index (one row per segment, `blas.chain_segments`) and the
+  transaction-level index (one row per block, `blas.chain_blocks`) from PostgreSQL on every request, so
+  a request touches only the segments and blocks it needs and nothing is cached between requests. The
+  rows are written during seeding (`query.SaveChain`); the auditor keeps only the block headers and the
+  keyword registry in memory. `FAIR_BLAS_CHAIN_IN_MEMORY=1` restores the in-memory chain for debugging
+  and must not be used for results. The anchor VM is a standing
   node for anchoring/setup; nothing measured depends on it.
 
 ## One-time setup

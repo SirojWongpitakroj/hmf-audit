@@ -15,6 +15,7 @@ import (
 // taken on faith.
 type FullNode struct {
 	Chain *chain.Chain
+	view  ChainView // when set, segments, blocks and header times come from it, not from Chain
 }
 
 // NewFullNode wraps a chain for answering queries.
@@ -42,6 +43,9 @@ type Stage1Result struct {
 // "unpartitioned run" baseline (T-049): correct regardless of Optimization
 // 1, and used as the cross-check ground truth for Stage1Segments.
 func (fn *FullNode) Stage1(qon QOn) (Stage1Result, error) {
+	if fn.view != nil {
+		return Stage1Result{}, fmt.Errorf("query: Stage1 over every segment needs the in-memory chain; use Stage1Optimized")
+	}
 	all := fn.Chain.Segments()
 	indices := make([]uint64, len(all))
 	for i := range all {
@@ -60,12 +64,11 @@ func (fn *FullNode) Stage1Segments(qon QOn, segmentIndices []uint64) (Stage1Resu
 
 func (fn *FullNode) stage1Over(qon QOn, segmentIndices []uint64) (Stage1Result, error) {
 	var res Stage1Result
-	all := fn.Chain.Segments()
-	for _, idx := range segmentIndices {
-		if idx >= uint64(len(all)) {
-			return Stage1Result{}, fmt.Errorf("query: segment index %d out of range", idx)
-		}
-		seg := all[idx]
+	selected, err := fn.segments(segmentIndices)
+	if err != nil {
+		return Stage1Result{}, err
+	}
+	for _, seg := range selected {
 		n := uint64(len(seg.Summaries))
 		vo, err := alis.ProcessBlockLevelQuery(seg.Store, n, alis.BlockLevelQuery{
 			LG: qon.LG, FK: qon.FK, HasRange: qon.HasRange, TS: qon.TS, TE: qon.TE,
@@ -97,12 +100,12 @@ type Stage2Result struct {
 // Stage2 implements R-QUERY-014..018.
 func (fn *FullNode) Stage2(qon QOn, candidateHeights []uint64) (Stage2Result, error) {
 	var res Stage2Result
-	blocks := fn.Chain.Blocks()
-	for _, h := range candidateHeights {
-		if h >= uint64(len(blocks)) {
-			return Stage2Result{}, fmt.Errorf("query: candidate height %d out of range", h)
-		}
-		b := blocks[h]
+	selected, err := fn.blocks(candidateHeights)
+	if err != nil {
+		return Stage2Result{}, err
+	}
+	for i, h := range candidateHeights {
+		b := selected[i]
 		vo, err := alis.ProcessTxLevelQuery(b.TxIndex, b.Transactions, alis.TxQuery{
 			LG: qon.LG, FK: qon.FK, HasRange: qon.HasRange, TS: qon.TS, TE: qon.TE,
 		})
@@ -133,6 +136,9 @@ func (fn *FullNode) AnswerQOn(qon QOn) (Stage1Result, Stage2Result, error) {
 // BlockHeight order — used by the backward-scan optimization (M10) to
 // decide which segments to search.
 func (fn *FullNode) Headers() []chain.BlockHeader {
+	if fn.view != nil {
+		return nil // a storage-backed node does not hold the headers; its view runs the backward scan
+	}
 	blocks := fn.Chain.Blocks()
 	out := make([]chain.BlockHeader, len(blocks))
 	for i, b := range blocks {
@@ -142,7 +148,12 @@ func (fn *FullNode) Headers() []chain.BlockHeader {
 }
 
 // SegmentSize returns S.
-func (fn *FullNode) SegmentSize() uint64 { return fn.Chain.SegmentSize() }
+func (fn *FullNode) SegmentSize() uint64 {
+	if fn.view != nil {
+		return fn.view.SegmentSize()
+	}
+	return fn.Chain.SegmentSize()
+}
 
 // AnswerQOnOptimized implements Optimization 1's query-side restriction
 // (R-OPT-002/R-OPT-009): the full node performs its own backward scan
@@ -168,6 +179,13 @@ func (fn *FullNode) AnswerQOnOptimized(qon QOn) (Stage1Result, Stage2Result, err
 // path in `verify`) can run Stage 1 alone before choosing which Stage 2
 // path to take.
 func (fn *FullNode) Stage1Optimized(qon QOn) (Stage1Result, error) {
+	if fn.view != nil {
+		indices, err := fn.view.IntersectingSegments(qon.HasRange, qon.TS, qon.TE)
+		if err != nil {
+			return Stage1Result{}, err
+		}
+		return fn.Stage1Segments(qon, indices)
+	}
 	indices := optimize.IntersectingSegments(headerTimes(fn.Headers()), fn.SegmentSize(), qon.HasRange, qon.TS, qon.TE)
 	return fn.Stage1Segments(qon, indices)
 }
@@ -186,5 +204,8 @@ func headerTimes(headers []chain.BlockHeader) []optimize.HeaderTimes {
 // KeywordRegistry returns the on-chain keyword-set-file registry
 // (R-FUNC-006/E4) from the underlying chain — see chain.Chain.KeywordRegistry.
 func (fn *FullNode) KeywordRegistry() map[uint64][]string {
+	if fn.view != nil {
+		return fn.view.KeywordRegistry()
+	}
 	return fn.Chain.KeywordRegistry()
 }

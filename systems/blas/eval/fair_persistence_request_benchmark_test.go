@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"blas/alis"
 	"blas/chain"
@@ -28,7 +29,7 @@ type fairBLASScenario struct {
 	placement string
 	batchSize int
 	request   query.Q
-	// set and expectedTS are used by native query sets (FAIR_QUERY_DIR): the set
+	// set and expectedTS are used by native query sets (FAIR_NATIVE_QUERIES_DIR): the set
 	// number and the timestamps of the records the query must return.
 	set        int
 	expectedTS []int64
@@ -47,6 +48,8 @@ type fairBLASRequestResult struct {
 	response      verify.Response
 	postgresReads int
 	loadedBytes   int
+	chainReads    int64 // PostgreSQL round trips of the full node's Stage 1/2 (zero for an in-memory chain)
+	chainBytes    int64 // payload bytes it read
 }
 
 // BenchmarkFairBLASVerificationRequest measures the complete request after it
@@ -61,7 +64,17 @@ func BenchmarkFairBLASVerificationRequest(b *testing.B) {
 	options := verify.Options{UseSegmentScan: true, UseAggregation: true}
 
 	scenarios := make([]fairBLASScenario, 0, 2*len(fairBLASBatchSizes))
+	native := fairNativeQueriesDir() != ""
+	if native {
+		var err error
+		if scenarios, err = fairBLASNativeScenarios(fairNativeQueriesDir(), state.vocabulary); err != nil {
+			b.Fatal(err)
+		}
+	}
 	for _, placement := range fairBLASPlacements {
+		if native {
+			break
+		}
 		for _, batchSize := range fairBLASBatchSizes {
 			expression := iomf.Keyword(fairBLASBatchKeyword(placement, batchSize))
 			scenarios = append(scenarios, fairBLASScenario{
@@ -70,14 +83,6 @@ func BenchmarkFairBLASVerificationRequest(b *testing.B) {
 				request:   query.Q{LG: 0, FK: expression, EK: expression},
 			})
 		}
-	}
-
-	if dir := os.Getenv("FAIR_QUERY_DIR"); dir != "" {
-		native, err := fairBLASNativeScenarios(dir, state.vocabulary)
-		if err != nil {
-			b.Fatal(err)
-		}
-		scenarios = native
 	}
 
 	for _, scenario := range scenarios {
@@ -102,8 +107,8 @@ func BenchmarkFairBLASVerificationRequest(b *testing.B) {
 
 			b.ResetTimer()
 			b.ReportMetric(float64(scenario.batchSize), "records/op")
-			if os.Getenv("FAIR_QUERY_DIR") != "" {
-				b.ReportMetric(9, "workload-version/op")
+			if native {
+				b.ReportMetric(fairNativeWorkloadVersion, "workload-version/op")
 			} else if os.Getenv("FAIR_REGION0_RECORDS") != "" {
 				b.ReportMetric(8, "workload-version/op")
 			}
@@ -117,7 +122,10 @@ func BenchmarkFairBLASVerificationRequest(b *testing.B) {
 			b.ReportMetric(float64(probe.loadedBytes), "cloud-bytes/op")
 			b.ReportMetric(float64(state.cloudFiles), "persisted-cloud-files")
 			b.ReportMetric(float64(state.cloudBytes), "persisted-cloud-bytes")
+			b.ReportMetric(float64(state.chainStoredBytes), "stored-chain-bytes")
 			b.ReportMetric(float64(probe.postgresReads), "postgres-reads/op")
+			b.ReportMetric(float64(probe.chainReads), "chain-reads/op")
+			b.ReportMetric(float64(probe.chainBytes), "chain-bytes/op")
 			b.ReportMetric(1, "proof-generation/op")
 			b.ReportMetric(float64(warmup), "warmup-ops")
 			b.StartTimer()
@@ -155,6 +163,7 @@ func executeFairBLASRequest(ctx context.Context, workers []*pgx.Conn,
 	fullNode *query.FullNode, registry map[uint64][]string, auditor *verify.Auditor,
 	scenario fairBLASScenario, options verify.Options) (fairBLASRequestResult, error) {
 	provider := query.NewConcurrentPostgresSP(ctx, workers)
+	fullNode.BeginRequest() // a storage-backed full node starts every request without anything cached
 	response, ok := auditor.PrepareResponse(
 		fullNode, provider, registry, scenario.request, options,
 	)
@@ -165,7 +174,10 @@ func executeFairBLASRequest(ctx context.Context, workers []*pgx.Conn,
 		)
 	}
 	reads, loadedBytes := provider.Stats()
+	chainReads, chainBytes := fullNode.ChainStats()
 	return fairBLASRequestResult{
+		chainReads:    chainReads,
+		chainBytes:    chainBytes,
 		result:        auditor.VerifyResponse(registry, scenario.request, response, options),
 		response:      response,
 		postgresReads: reads,
@@ -189,9 +201,10 @@ func encodeFairBLASValue(value any) ([]byte, error) {
 // set file (the build keeps it beside the chain rather than registering it on
 // the Chain value).
 type fairBLASState struct {
+	fileRoots      map[query.FileRef]alis.Transaction
 	database       *pgx.Conn
 	workers        []*pgx.Conn // fairBLASConcurrency readers; workers[0] is database
-	fullNode      *query.FullNode
+	fullNode       *query.FullNode
 	auditor        *verify.Auditor
 	registry       map[uint64][]string
 	vocabulary     []string
@@ -199,6 +212,8 @@ type fairBLASState struct {
 	datasetRecords int
 	cloudFiles     int
 	cloudBytes     int
+
+	chainStoredBytes int64 // payload bytes of the stored segments and blocks (zero with the in-memory chain)
 }
 
 // TestMain closes the shared fixture's connection once every benchmark in the
@@ -239,10 +254,21 @@ func sharedFairBLAS(b *testing.B) *fairBLASState {
 }
 
 func seedFairBLAS(ctx context.Context) (*fairBLASState, error) {
+	return loadFairBLAS(ctx, true)
+}
+
+func loadFairBLAS(ctx context.Context, persist bool) (*fairBLASState, error) {
 	// Setup only: seeding is not timed, so it may use every core. The timed
 	// requests run again under the process's GOMAXPROCS (1).
 	defer raiseFairSetupProcs()()
-	database, err := pgx.Connect(ctx, os.Getenv("FAIR_POSTGRES_DSN"))
+	connection, err := pgx.ParseConfig(os.Getenv("FAIR_POSTGRES_DSN"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid BLAS PostgreSQL configuration")
+	}
+	if !persist {
+		connection.RuntimeParams["default_transaction_read_only"] = "on"
+	}
+	database, err := pgx.ConnectConfig(ctx, connection)
 	if err != nil {
 		return nil, fmt.Errorf("connect PostgreSQL: %w", err)
 	}
@@ -254,16 +280,57 @@ func seedFairBLAS(ctx context.Context) (*fairBLASState, error) {
 	if err != nil {
 		return nil, err
 	}
-	build, err := buildAndPersistFairBLAS(ctx, database, cfg, vocabulary, total)
+	writer := database
+	if !persist {
+		writer = nil
+	}
+	var batchKeywords map[int][]string
+	if persist && fairNativeQueriesDir() == "" {
+		batchKeywords = fairBLASBatchKeywords(total)
+	}
+	if !persist {
+		batchKeywords, err = cloudBLASBatchKeywords(ctx, database, cfg, vocabulary, total)
+		if err != nil {
+			_ = database.Close(ctx)
+			return nil, err
+		}
+	}
+	build, err := buildAndPersistFairBLAS(ctx, writer, cfg, vocabulary, total, batchKeywords)
 	if err != nil {
-		return nil, fmt.Errorf("persist BLAS off-chain storage: %w", err)
+		return nil, fmt.Errorf("build BLAS reference chain: %w", err)
 	}
 	headers := make([]chain.BlockHeader, len(build.chain.Blocks()))
+	var fileRoots map[query.FileRef]alis.Transaction
+	if !persist {
+		fileRoots = make(map[query.FileRef]alis.Transaction, build.files)
+	}
 	for index, block := range build.chain.Blocks() {
 		headers[index] = block.Header
+		if !persist {
+			for _, transaction := range block.Transactions {
+				fileRoots[query.FileRef{LID: transaction.LID, FID: transaction.FID}] = transaction
+			}
+		}
 	}
 	if _, ok := build.registry[0]; !ok {
 		return nil, fmt.Errorf("shared dataset did not produce BLAS log generator 0")
+	}
+	// The full node's block-level and transaction-level indexes live in PostgreSQL, not in the process:
+	// at the scale the paper targets they do not fit in memory, and a request reads only the segments and
+	// blocks it needs. Saving them is setup. FAIR_BLAS_CHAIN_IN_MEMORY=1 keeps the in-memory chain instead.
+	// Only the seeding run stores the chain; the read-only run (persist == false, the cloud demo) reuses
+	// the reference chain it just rebuilt.
+	storeChain := persist && os.Getenv("FAIR_BLAS_CHAIN_IN_MEMORY") != "1"
+	var chainBytes int64
+	if storeChain {
+		started := time.Now()
+		chainBytes, err = query.SaveChain(ctx, database, build.chain)
+		fmt.Fprintf(os.Stderr, "fixture-timing: BLAS: store the block- and transaction-level indexes in PostgreSQL: %s\n",
+			time.Since(started).Round(time.Millisecond))
+		if err != nil {
+			_ = database.Close(ctx)
+			return nil, fmt.Errorf("store BLAS chain: %w", err)
+		}
 	}
 	// Same request concurrency as HMF-Audit, DHT-backed and EVSEB: 8 readers, opened once
 	// here so connection setup is not part of any measured request.
@@ -271,9 +338,19 @@ func seedFairBLAS(ctx context.Context) (*fairBLASState, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open BLAS reader connections: %w", err)
 	}
+	fullNode := query.NewFullNode(build.chain)
+	if storeChain {
+		view, err := query.OpenPostgresChain(ctx, workers)
+		if err != nil {
+			return nil, fmt.Errorf("open stored BLAS chain: %w", err)
+		}
+		fullNode = query.NewFullNodeFromView(view)
+		build.chain = nil // from here on only the database holds the indexes
+	}
 	runtime.GC()
 	return &fairBLASState{
-		database: database, workers: workers, fullNode: query.NewFullNode(build.chain),
+		chainStoredBytes: chainBytes,
+		fileRoots:        fileRoots, database: database, workers: workers, fullNode: fullNode,
 		auditor: verify.NewAuditor(headers, cfg.SegmentSize), registry: build.registry,
 		vocabulary: vocabulary,
 		blocks:     len(headers), datasetRecords: total,
@@ -292,8 +369,9 @@ type fairBLASBuild struct {
 // packed into ALIS entry files, each file is COPYed into PostgreSQL as it is
 // closed and then dropped, and its metadata goes on-chain a block at a time.
 // Setup therefore holds the chain, not the dataset or the entry files.
+// A nil database rebuilds only the reference chain for read-only verification.
 func buildAndPersistFairBLAS(ctx context.Context, database *pgx.Conn, cfg Config,
-	vocabulary []string, total int) (*fairBLASBuild, error) {
+	vocabulary []string, total int, batchKeywords map[int][]string) (*fairBLASBuild, error) {
 	file, err := os.Open(os.Getenv("FAIR_DATASET_PATH"))
 	if err != nil {
 		return nil, err
@@ -308,12 +386,6 @@ func buildAndPersistFairBLAS(ctx context.Context, database *pgx.Conn, cfg Config
 	}
 	build := &fairBLASBuild{chain: logChain, registry: map[uint64][]string{}}
 	generator := alis.NewLogGenerator(0)
-	// The artificial batch keywords exist only to craft exact-size queries; native
-	// query sets (FAIR_QUERY_DIR) use the natural keywords alone.
-	var batchKeywords map[int][]string
-	if os.Getenv("FAIR_QUERY_DIR") == "" {
-		batchKeywords = fairBLASBatchKeywords(total)
-	}
 	var pending []alis.FileMetadata
 	var fid uint64
 	ordinal, region := 0, -1
@@ -360,9 +432,12 @@ func buildAndPersistFairBLAS(ctx context.Context, database *pgx.Conn, cfg Config
 		if err != nil {
 			return nil, err
 		}
-		payload, err := encodeFairBLASValue(entryFile)
-		if err != nil {
-			return nil, fmt.Errorf("encode file %d: %w", fid, err)
+		var payload []byte
+		if database != nil {
+			payload, err = encodeFairBLASValue(entryFile)
+			if err != nil {
+				return nil, fmt.Errorf("encode file %d: %w", fid, err)
+			}
 		}
 		pending = append(pending, meta)
 		if len(pending) == cfg.FilesPerBlock {
@@ -378,16 +453,28 @@ func buildAndPersistFairBLAS(ctx context.Context, database *pgx.Conn, cfg Config
 		return row, nil
 	}
 
-	if _, err := database.Exec(ctx, "TRUNCATE TABLE blas.entry_files"); err != nil {
-		return nil, err
-	}
-	inserted, err := database.CopyFrom(ctx, pgx.Identifier{"blas", "entry_files"},
-		[]string{"lid", "fid", "payload"}, pgx.CopyFromFunc(nextFile))
-	if err != nil {
-		return nil, err
-	}
-	if inserted != int64(build.files) {
-		return nil, fmt.Errorf("persisted %d BLAS files, want %d", inserted, build.files)
+	if database == nil {
+		for {
+			row, err := nextFile()
+			if err != nil {
+				return nil, err
+			}
+			if row == nil {
+				break
+			}
+		}
+	} else {
+		if _, err := database.Exec(ctx, "TRUNCATE TABLE blas.entry_files"); err != nil {
+			return nil, err
+		}
+		inserted, err := database.CopyFrom(ctx, pgx.Identifier{"blas", "entry_files"},
+			[]string{"lid", "fid", "payload"}, pgx.CopyFromFunc(nextFile))
+		if err != nil {
+			return nil, err
+		}
+		if inserted != int64(build.files) {
+			return nil, fmt.Errorf("persisted %d BLAS files, want %d", inserted, build.files)
+		}
 	}
 	if len(pending) > 0 {
 		if _, err := logChain.AddBlock(pending); err != nil {
