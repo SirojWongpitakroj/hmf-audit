@@ -22,6 +22,11 @@ from the log.
     region_id   synthetic, uniform: "R" + (uint64_be(SHA256("region|<seed>|<source_id>")[:8]) mod NumRegions)
     tenant_id   synthetic, uniform: "T" + (uint64_be(SHA256("tenant|<seed>|<source_id>")[:8]) mod NumTenants)
                 (the same construction as gen_openstack_metadata.py)
+                With --tenant-model skewed the same hash picks a tenant from a fixed,
+                heavy-tailed table (TENANT_TIERS below) instead: a few large tenants and a
+                long tail of small ones (84 tenants), so that every clustered and scattered
+                query size up to q = 4096 exists as one (tenant, service, log type, region)
+                time range, with at least four tenants able to supply a clustered q = 4096.
     service_id  from the container: container number 000001 is the YARN
                 ApplicationMaster ("spark-application-master"); every other
                 container is an executor ("spark-executor")
@@ -68,6 +73,42 @@ def hashed_index(label: str, seed: str, source_id: str, modulus: int) -> int:
     return int.from_bytes(digest[:8], "big") % modulus
 
 
+# Skewed tenant model. Each tier is (tenants, parts of 1,000,000); the tier's parts are
+# shared equally by its tenants, so the table is exact integer arithmetic and the
+# assignment is a pure function of (seed, source_id):
+#   T0..T3 20% each (80% together), and T4..T83 0.25% each (80 tenants, 20% together).
+# The shares are CHOSEN, not measured: they make every query size of the native query set
+# exist (a query is one tenant's records of one service and log type in a time range; a
+# record is one line, and the records of a region are ordered by file and time):
+#   clustered q = 4096 needs a tenant that owns about a fifth of the records (4,096 of its
+#   consecutive records then span about 2.6 segments of 8,192 leaves, so at most 4
+#   adjacent segments), and we want at least four such tenants; smaller q need less;
+#   scattered q needs groups of a few thousand records per region (a 0.25% tenant has
+#   about 6,250 in a 2.5M-record region), so that q consecutive records spread over the
+#   whole region. The tenant model is synthetic and must be described as such.
+TENANT_TIERS = ((4, 800_000), (80, 200_000))
+TENANT_PARTS = 1_000_000
+SKEWED_TENANTS = sum(count for count, _ in TENANT_TIERS)
+assert sum(parts for _, parts in TENANT_TIERS) == TENANT_PARTS
+
+
+def skewed_tenant_index(seed: str, source_id: str) -> int:
+    bucket = hashed_index("tenant", seed, source_id, TENANT_PARTS)
+    first, low = 0, 0
+    for count, parts in TENANT_TIERS:
+        if bucket < low + parts:
+            return first + (bucket - low) * count // parts
+        first += count
+        low += parts
+    raise AssertionError("unreachable: the tier table covers every bucket")
+
+
+def tenant_index(model: str, seed: str, source_id: str, num_tenants: int) -> int:
+    if model == "skewed":
+        return skewed_tenant_index(seed, source_id)
+    return hashed_index("tenant", seed, source_id, num_tenants)
+
+
 def log_id(seed: str, source_id: str) -> str:
     digest = hashlib.sha256(f"logid|{seed}|{source_id}".encode("utf-8")).digest()
     return str(uuid.UUID(bytes=digest[:16], version=4))
@@ -111,7 +152,7 @@ def first_entry(path: str):
     return None, None
 
 
-def generate(raw_dir, out_path, num_regions, num_tenants, seed, limit_applications):
+def generate(raw_dir, out_path, num_regions, num_tenants, seed, limit_applications, tenant_model="uniform"):
     seed_str = str(seed)
     regions, tenants, services, log_types = Counter(), Counter(), Counter(), Counter()
     inferred_counts = Counter()
@@ -142,7 +183,7 @@ def generate(raw_dir, out_path, num_regions, num_tenants, seed, limit_applicatio
                         "source_id": source_id,
                         "raw_log": raw,
                         "region_id": f"R{hashed_index('region', seed_str, source_id, num_regions)}",
-                        "tenant_id": f"T{hashed_index('tenant', seed_str, source_id, num_tenants)}",
+                        "tenant_id": f"T{tenant_index(tenant_model, seed_str, source_id, num_tenants)}",
                         "service_id": service,
                     }
                     match = ENTRY.match(raw)
@@ -171,6 +212,9 @@ def generate(raw_dir, out_path, num_regions, num_tenants, seed, limit_applicatio
         "seed": seed,
         "num_regions": num_regions,
         "num_tenants": num_tenants,
+        "tenant_model": tenant_model,
+        "tenant_tiers": [{"tenants": count, "parts_of_1000000": parts} for count, parts in TENANT_TIERS]
+                        if tenant_model == "skewed" else None,
         "region_hash_input": "region|<seed>|<source_id>",
         "tenant_hash_input": "tenant|<seed>|<source_id>",
         "logid_hash_input": "logid|<seed>|<source_id> (first 16 bytes, UUID version 4 bits)",
@@ -218,15 +262,20 @@ def main():
     parser.add_argument("--raw-dir", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--num-regions", type=int, default=8)
-    parser.add_argument("--num-tenants", type=int, default=1000)
+    parser.add_argument("--num-tenants", type=int, default=1000,
+                        help="tenants of the uniform model (ignored with --tenant-model skewed)")
+    parser.add_argument("--tenant-model", choices=("uniform", "skewed"), default="uniform",
+                        help="uniform: every tenant equally likely (the pinned 10M dataset); "
+                             "skewed: 84 tenants in the heavy-tailed table TENANT_TIERS")
     parser.add_argument("--seed", default="42")
     parser.add_argument("--limit-applications", type=int, default=0,
                         help="process only the first N applications (sorted); 0 means all")
     args = parser.parse_args()
     if args.num_regions <= 0 or args.num_tenants <= 0:
         parser.error("--num-regions and --num-tenants must be positive")
-    validation = generate(args.raw_dir, args.out, args.num_regions, args.num_tenants,
-                          args.seed, args.limit_applications)
+    num_tenants = SKEWED_TENANTS if args.tenant_model == "skewed" else args.num_tenants
+    validation = generate(args.raw_dir, args.out, args.num_regions, num_tenants,
+                          args.seed, args.limit_applications, args.tenant_model)
     print(json.dumps({key: validation[key] for key in (
         "applications", "container_files", "total_records", "records_with_inferred_attributes",
         "record_count_per_region", "record_count_per_service", "record_count_per_log_type",

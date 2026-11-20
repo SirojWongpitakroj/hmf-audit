@@ -34,6 +34,12 @@ Options:
                      with --dest-dir: <dest-dir>/spark_stratified_10000000.jsonl)
   --stop-after STEP  raw | combined | subset (default subset)
   --force            replace a Spark/ folder that does not verify (moved aside, not deleted)
+  --tenant-model M   uniform (default: the pinned 1000-tenant dataset) or skewed (84 tenants in
+                     the heavy-tailed table of gen_spark_combined.py, so that clustered and
+                     scattered queries up to q = 4096 exist). A skewed dataset is a different
+                     dataset: it is written to combined/spark_skewed_combined.jsonl, needs an
+                     explicit --output (never the pinned file), is not compared with the
+                     pinned SHA-256, and its own SHA-256 is written to <output>.sha256.
 """
 
 import argparse
@@ -252,9 +258,10 @@ def step_raw(dest, reference, force):
 
 
 # --------------------------------------------------------------------- step 2
-def step_combined(dest, raw_dir, reference, validation, force):
+def step_combined(dest, raw_dir, reference, validation, force, tenant_model="uniform"):
     combined_dir = dest / "combined"
-    combined = combined_dir / "spark_uniform_combined.jsonl"
+    stem = "spark_uniform_combined" if tenant_model == "uniform" else "spark_skewed_combined"
+    combined = combined_dir / f"{stem}.jsonl"
     if combined.is_file() and not force:
         lines = count_lines(combined)
         if lines == RAW_LINES:
@@ -263,14 +270,15 @@ def step_combined(dest, raw_dir, reference, validation, force):
         log(f"existing combined file has {lines} records, expected {RAW_LINES}; rebuilding")
     build = combined_dir / f".build-{os.getpid()}"
     build.mkdir(parents=True, exist_ok=True)
-    out = build / "spark_uniform_combined.jsonl"
+    out = build / f"{stem}.jsonl"
     log("generating the combined file (33.2M records; this takes a while)")
     subprocess.run([sys.executable, "-I", str(SCRIPTS / "gen_spark_combined.py"),
                     "--raw-dir", str(raw_dir), "--out", str(out),
-                    "--num-regions", str(REGIONS), "--num-tenants", str(TENANTS), "--seed", SEED],
+                    "--num-regions", str(REGIONS), "--num-tenants", str(TENANTS), "--seed", SEED,
+                    "--tenant-model", tenant_model],
                    check=True, stdout=subprocess.DEVNULL)
-    new_validation = json.loads((build / "spark_uniform_combined.validation.json").read_text(encoding="utf-8"))
-    new_config = json.loads((build / "spark_uniform_combined.config.json").read_text(encoding="utf-8"))
+    new_validation = json.loads((build / f"{stem}.validation.json").read_text(encoding="utf-8"))
+    new_config = json.loads((build / f"{stem}.config.json").read_text(encoding="utf-8"))
     problems = []
     if new_validation["total_records"] != RAW_LINES:
         problems.append(f"total_records {new_validation['total_records']} != {RAW_LINES}")
@@ -282,7 +290,7 @@ def step_combined(dest, raw_dir, reference, validation, force):
         die("the regenerated combined file does not match the recorded one: " + "; ".join(problems), 3)
     combined_dir.mkdir(parents=True, exist_ok=True)
     os.replace(out, combined)
-    for name in ("spark_uniform_combined.config.json", "spark_uniform_combined.validation.json"):
+    for name in (f"{stem}.config.json", f"{stem}.validation.json"):
         if not (combined_dir / name).exists():
             shutil.copy2(build / name, combined_dir / name)
     shutil.rmtree(build)
@@ -291,7 +299,9 @@ def step_combined(dest, raw_dir, reference, validation, force):
 
 
 # --------------------------------------------------------------------- step 3
-def step_subset(combined, output, force):
+def step_subset(combined, output, force, tenant_model="uniform"):
+    if tenant_model != "uniform":
+        return step_skewed_subset(combined, output, force)
     if output.is_file() and not force:
         if digest_file(output, "sha256") == SUBSET_SHA256:
             log(f"subset already present and matches the pinned SHA-256: {output}")
@@ -317,17 +327,49 @@ def step_subset(combined, output, force):
     log(f"subset written: {lines} records, sha256 {got} == pinned value  [REPRODUCED]")
 
 
+def step_skewed_subset(combined, output, force):
+    """The same deterministic selection on the skewed combined file. There is no pinned
+    value: the result's SHA-256 is recorded next to it and is what the experiment scripts
+    and the query-set directory must carry."""
+    if output.resolve() == DEFAULT_SUBSET.resolve():
+        die("a skewed dataset must not be written to the pinned subset path; pass --output", 2)
+    sidecar = output.with_name(output.name + ".sha256")
+    if output.is_file() and sidecar.is_file() and not force:
+        if digest_file(output, "sha256") == sidecar.read_text(encoding="ascii").split()[0]:
+            log(f"skewed subset already present and matches {sidecar.name}: {output}")
+            return
+        log("existing skewed subset does not match its recorded SHA-256; rebuilding")
+    if shutil.which("go") is None:
+        die("go is not installed (needed to select the subset)")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    partial = output.with_name(output.name + ".partial")
+    log(f"selecting {PER_REGION} evenly spaced records from each of {REGIONS} regions (skewed tenants)")
+    subprocess.run(["go", "run", str(SCRIPTS / "select_fair_subset.go"), "-input", str(combined),
+                    "-output", str(partial), "-regions", str(REGIONS), "-per-region", str(PER_REGION)],
+                   check=True, env={**os.environ, "CGO_ENABLED": "0"})
+    lines = count_lines(partial)
+    if lines != SUBSET_RECORDS:
+        die(f"the skewed subset has {lines} records, expected {SUBSET_RECORDS}", 3)
+    got = digest_file(partial, "sha256")
+    os.replace(partial, output)
+    sidecar.write_text(got + "  " + output.name + "\n", encoding="ascii")
+    log(f"skewed subset written: {lines} records, sha256 {got} (recorded in {sidecar.name})")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--dest-dir", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--stop-after", choices=("raw", "combined", "subset"), default="subset")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--tenant-model", choices=("uniform", "skewed"), default="uniform")
     args = parser.parse_args()
 
     if sys.version_info < (3, 9):
         die("Python 3.9 or newer is required")
     dest = (args.dest_dir or REPO / "dataset").resolve()
+    if args.tenant_model != "uniform" and not args.output:
+        die("--tenant-model skewed needs an explicit --output (the pinned subset path is for the uniform dataset)", 2)
     if args.output:
         output = args.output.resolve()
     elif args.dest_dir:
@@ -343,7 +385,7 @@ def main():
 
     # The 10M subset is the only thing the experiments read. If it is already in
     # place and matches the pinned SHA-256, the raw and combined data are not needed.
-    if args.stop_after == "subset" and not args.force and output.is_file():
+    if args.tenant_model == "uniform" and args.stop_after == "subset" and not args.force and output.is_file():
         if digest_file(output, "sha256") == SUBSET_SHA256:
             log(f"subset already present and matches the pinned SHA-256: {output}")
             log("nothing to download or rebuild (use --force to rebuild from the raw logs)")
@@ -352,7 +394,7 @@ def main():
 
     # Only the combined file is wanted (e.g. a 100k run): if it is already complete
     # there is no need for the raw logs, so do not download them again.
-    combined_file = dest / "combined" / "spark_uniform_combined.jsonl"
+    combined_file = dest / "combined" / ("spark_uniform_combined.jsonl" if args.tenant_model == "uniform" else "spark_skewed_combined.jsonl")
     if args.stop_after == "combined" and not args.force and combined_file.is_file():
         if count_lines(combined_file) == RAW_LINES:
             log(f"combined file already present with {RAW_LINES} records: {combined_file}")
@@ -361,10 +403,10 @@ def main():
     raw_dir = step_raw(dest, reference, args.force)
     if args.stop_after == "raw":
         return
-    combined = step_combined(dest, raw_dir, reference, validation, args.force)
+    combined = step_combined(dest, raw_dir, reference, validation, args.force, args.tenant_model)
     if args.stop_after == "combined":
         return
-    step_subset(combined, output, args.force)
+    step_subset(combined, output, args.force, args.tenant_model)
     log("done. Next: cd systems/experiments/scripts && ./run_pipeline.sh   (or .\\run_pipeline.ps1)")
 
 
