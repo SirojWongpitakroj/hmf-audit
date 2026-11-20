@@ -44,8 +44,13 @@ func BenchmarkFairDHTVerificationRequest(b *testing.B) {
 	proofStore := openFairDHTCassandra(b)
 	b.Cleanup(proofStore.Close)
 
+	concurrency := fairDHTConcurrency(b)
+	limits, err := fairDHTBenchmarkLimits(concurrency)
+	if err != nil {
+		b.Fatal(err)
+	}
 	proofs, err := cassandradht.New(ctx, proofStore, fixture.ca.PublicKey(), cassandradht.Config{
-		Peers: fairDHTPeers(b), Concurrency: fairDHTConcurrency(b),
+		Peers: fairDHTPeers(b), Concurrency: concurrency, Limits: &limits,
 	})
 	if err != nil {
 		b.Fatalf("open Cassandra DHT: %v", err)
@@ -58,7 +63,13 @@ func BenchmarkFairDHTVerificationRequest(b *testing.B) {
 	runtime.GC()
 	debug.FreeOSMemory()
 
-	runCase := func(name string, batchSize int, ids []string) {
+	for _, request := range fixture.cases {
+		placement, batchSize := request.placement, request.count
+		ids := fixture.batches[request]
+		name := fmt.Sprintf("%s/q=%d", placement, batchSize)
+		if fixture.native {
+			name += fmt.Sprintf("/set=%d", request.set)
+		}
 		b.Run(name, func(b *testing.B) {
 			b.StopTimer()
 			// A complete benchmark suite can exceed the token's fixed one-hour
@@ -85,11 +96,13 @@ func BenchmarkFairDHTVerificationRequest(b *testing.B) {
 			}
 			b.ResetTimer()
 			b.ReportMetric(float64(batchSize), "records/op")
-			if os.Getenv("FAIR_QUERY_DIR") != "" {
-				b.ReportMetric(9, "workload-version/op")
+			if fixture.native {
+				b.ReportMetric(fairNativeWorkloadVersion, "workload-version/op")
 			} else if os.Getenv("FAIR_REGION0_RECORDS") != "" {
 				b.ReportMetric(8, "workload-version/op")
 			}
+			b.ReportMetric(float64(limits.MaxRequests), "dht-max-requests/op")
+			b.ReportMetric(float64(limits.ProofBytes), "dht-proof-byte-bound/op")
 			b.ReportMetric(float64(validation.HashCount), "hashes/op")
 			b.ReportMetric(float64(validation.Ancestors), "ancestors/op")
 			b.ReportMetric(float64(reads.Lookups), "cassandra-dht-lookups/op")
@@ -109,30 +122,6 @@ func BenchmarkFairDHTVerificationRequest(b *testing.B) {
 				fairDHTResult = result
 			}
 		})
-	}
-	// Native query sets: with FAIR_QUERY_DIR set, run the five clustered and five
-	// scattered record sets per q from the query file instead of the fixed placements.
-	if dir := os.Getenv("FAIR_QUERY_DIR"); dir != "" {
-		maxQ, err := fairDHTMaxQ(os.Getenv("FAIR_DHT_MAX_Q"))
-		if err != nil {
-			b.Fatal(err)
-		}
-		cases, err := fairDHTNativeCases(dir, maxQ)
-		if err != nil {
-			b.Fatal(err)
-		}
-		for _, c := range cases {
-			for _, set := range c.Sets {
-				runCase(fmt.Sprintf("%s/q=%d/set=%d", c.Shape, c.Q, set.Set), c.Q, set.IDs)
-			}
-		}
-		return
-	}
-	for _, placement := range fairDHTPlacements {
-		for _, batchSize := range fairDHTRequestCounts {
-			ids := fixture.batches[fairDHTCase{placement: placement, count: batchSize}]
-			runCase(fmt.Sprintf("%s/q=%d", placement, batchSize), batchSize, ids)
-		}
 	}
 }
 

@@ -165,7 +165,7 @@ func TestBuildSparseTreeSingleRecordFinalEpoch(t *testing.T) {
 func TestFairDHTSelectedBatchesRetainOnlyRequestedIDs(t *testing.T) {
 	const total = 100_000
 	const segmentLeaves = 8192
-	batches, err := fairDHTSelectedBatches(total, segmentLeaves)
+	batches, _, err := fairDHTSelectedBatches(total, segmentLeaves)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,11 +178,11 @@ func TestFairDHTSelectedBatchesRetainOnlyRequestedIDs(t *testing.T) {
 			t.Fatalf("%s q=1 = %v", placement, ids)
 		}
 	}
-	clustered := batches[fairDHTCase{placement: "clustered-2", count: 16384}]
+	clustered := batches[fairDHTCase{placement: "clustered-2", count: 4096}]
 	if clustered[len(clustered)-1] != encryptor.FormatRecordID(2*segmentLeaves-1) {
 		t.Fatalf("clustered-2 last ID = %s", clustered[len(clustered)-1])
 	}
-	scattered := batches[fairDHTCase{placement: "scattered", count: 16384}]
+	scattered := batches[fairDHTCase{placement: "scattered", count: 4096}]
 	if scattered[len(scattered)-1] != encryptor.FormatRecordID(total-1) {
 		t.Fatalf("scattered last ID = %s", scattered[len(scattered)-1])
 	}

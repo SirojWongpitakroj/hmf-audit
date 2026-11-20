@@ -126,7 +126,17 @@ func inConcurrentDHT(path string) bool {
 	// Transport/storage and the incremental publication coordinator may use
 	// bounded concurrency. The latter serializes its shared publisher while
 	// independent type trees prepare; native verification remains serial.
-	return strings.Contains(path, string(filepath.Separator)+concurrentDHTDir+string(filepath.Separator)) || strings.Contains(path, string(filepath.Separator)+filepath.Join("internal", "peerdht")+string(filepath.Separator)) || strings.HasSuffix(path, filepath.Join("benchmark", "incremental_publish.go"))
+	return strings.Contains(path, string(filepath.Separator)+concurrentDHTDir+string(filepath.Separator)) || strings.Contains(path, string(filepath.Separator)+filepath.Join("internal", "peerdht")+string(filepath.Separator)) || strings.HasSuffix(path, filepath.Join("benchmark", "incremental_publish.go")) || inBenchmarkIngest(path)
+}
+
+// inBenchmarkIngest lists the fair-benchmark setup files that seed the fixture
+// with bounded parallelism (fair_fixture.go, pipelined_publication*.go). They
+// run outside every timer and are not part of the scheme under test; the
+// verifier and the authenticated structure stay single-goroutine.
+func inBenchmarkIngest(path string) bool {
+	dir := string(filepath.Separator) + "benchmark" + string(filepath.Separator)
+	base := filepath.Base(path)
+	return strings.Contains(path, dir) && (base == "fair_fixture.go" || strings.HasPrefix(base, "pipelined_publication"))
 }
 
 // §0.6 / Q32: single-goroutine execution model. The paper requires no

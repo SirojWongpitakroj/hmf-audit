@@ -33,15 +33,16 @@ var (
 )
 
 var fairEVBESPlacements = []string{"clustered-2", "scattered"}
-var fairEVBESRequestCounts = []int{1, 16, 64, 256, 1024, 4096, 16384}
+var fairEVBESRequestCounts = []int{1, 16, 64, 256, 1024, 4096}
 
 // fairEVBESDefaultDHTPeers is the modelled overlay size, the same 16 logical
 // nodes (4 routing hops per lookup) the DHT-backed system uses. FAIR_DHT_PEERS
 // overrides it for both systems; 1 turns routing off.
 const fairEVBESDefaultDHTPeers = 16
+
 var fairEVBESTamperCounts = []int{1, 2, 4, 8, 16, 32, 64, 128, 256}
 
-const fairEVBESFixedBatchSize = 1 << 14
+const fairEVBESFixedBatchSize = 1 << 12
 
 func BenchmarkFairEVBESDetectAndLocalizeCore(b *testing.B) {
 	runFairEVBES(b, true)
@@ -52,7 +53,7 @@ func BenchmarkFairEVBESLocalizationAfterMismatch(b *testing.B) {
 }
 
 // BenchmarkFairEVBESTamperCountLocalization holds the requested batch at
-// 2^14 and varies the number of persistently tampered requested logs.
+// 2^12 and varies the number of persistently tampered requested logs.
 func BenchmarkFairEVBESTamperCountLocalization(b *testing.B) {
 	b.StopTimer()
 	ctx := context.Background()
@@ -73,7 +74,7 @@ func BenchmarkFairEVBESTamperCountLocalization(b *testing.B) {
 				if err := replaceFairEVBESTampers(ctx, database, tampered); err != nil {
 					b.Fatal(err)
 				}
-				runFairEVBESCase(b, ctx, database, dht, setup, candidates, tampered)
+				runFairEVBESCase(b, ctx, database, dht, setup, candidates, tampered, 8)
 			})
 		}
 	}
@@ -95,21 +96,22 @@ func runFairEVBES(b *testing.B, tamper bool) {
 	database, dht, setup := sharedFairEVBES(b)
 	segmentLeaves := fairEVBESSegmentLeaves(b)
 
-	// Native query sets (verification only): with FAIR_QUERY_DIR set, run the five
-	// clustered and five scattered record sets per q from the query file. The
-	// localization benchmarks keep their fixed placements.
-	if dir := os.Getenv("FAIR_QUERY_DIR"); dir != "" && !tamper {
-		cases, err := fairEVBESNativeCases(dir, setup.leafCount)
+	// Experiment 1 on the native query set: the five batches of every
+	// (shape, q) in dht_evseb_queries.json. Localization keeps clustered-2.
+	if dir := fairNativeQueriesDir(); dir != "" && !tamper {
+		batches, err := loadFairNativeBatches(dir, "EVSEB", fairEVBESNativeRequestCounts, setup.leafCount)
 		if err != nil {
 			b.Fatal(err)
 		}
-		for _, c := range cases {
-			for _, set := range c.Sets {
-				b.Run(fmt.Sprintf("%s/q=%d/set=%d", c.Shape, c.Q, set.Set), func(b *testing.B) {
-					b.StopTimer()
-					runFairEVBESCase(b, ctx, database, dht, setup, set.LIDs, nil)
-				})
-			}
+		for _, batch := range batches {
+			b.Run(fmt.Sprintf("%s/q=%d/set=%d", batch.Shape, batch.Q, batch.Set), func(b *testing.B) {
+				b.StopTimer()
+				candidates := make([]string, len(batch.Ordinals))
+				for index, ordinal := range batch.Ordinals {
+					candidates[index] = fairEVBESLID(ordinal)
+				}
+				runFairEVBESCase(b, ctx, database, dht, setup, candidates, nil, fairNativeWorkloadVersion)
+			})
 		}
 		return
 	}
@@ -126,7 +128,7 @@ func runFairEVBES(b *testing.B, tamper bool) {
 						b.Fatal(err)
 					}
 				}
-				runFairEVBESCase(b, ctx, database, dht, setup, candidates, tamperedLIDs)
+				runFairEVBESCase(b, ctx, database, dht, setup, candidates, tamperedLIDs, 8)
 			})
 		}
 	}
@@ -137,7 +139,7 @@ func runFairEVBES(b *testing.B, tamper bool) {
 
 func runFairEVBESCase(b *testing.B, ctx context.Context, database *pgx.Conn,
 	dht *fairEVBESCassandraDHT, setup *fairEVBESSetup, candidates []string,
-	tamperedLIDs []string) {
+	tamperedLIDs []string, workloadVersion int) {
 	b.Helper()
 	tamperedRecords := len(tamperedLIDs)
 	wantVerified := len(candidates) - tamperedRecords
@@ -179,10 +181,8 @@ func runFairEVBESCase(b *testing.B, ctx context.Context, database *pgx.Conn,
 	}
 	b.ResetTimer()
 	b.ReportMetric(float64(len(candidates)), "records/op")
-	if os.Getenv("FAIR_QUERY_DIR") != "" {
-		b.ReportMetric(9, "workload-version/op")
-	} else if os.Getenv("FAIR_REGION0_RECORDS") != "" {
-		b.ReportMetric(8, "workload-version/op")
+	if os.Getenv("FAIR_REGION0_RECORDS") != "" || workloadVersion == fairNativeWorkloadVersion {
+		b.ReportMetric(float64(workloadVersion), "workload-version/op")
 	}
 	b.ReportMetric(float64(len(candidates)), "candidate-leaves/op")
 	b.ReportMetric(float64(setup.treeLevels), "tree-levels/op")
@@ -457,6 +457,9 @@ func seedFairEVBES(ctx context.Context, database *pgx.Conn, dht *fairEVBESCassan
 	anchor, err := chain.VerifyIntegrity()
 	if err != nil {
 		return nil, err
+	}
+	if err := saveCloudDemoEVSEBTrust(anchor, count); err != nil {
+		return nil, fmt.Errorf("save dashboard EVSEB trusted root: %w", err)
 	}
 	return &fairEVBESSetup{
 		leafCount: count, anchor: bytes.Clone(anchor), treeLevels: treeLevels,

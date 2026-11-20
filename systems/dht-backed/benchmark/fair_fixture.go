@@ -11,9 +11,11 @@ import (
 	"math/bits"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"dhtbacked/auth"
@@ -39,7 +41,7 @@ const (
 )
 
 var fairDHTPlacements = []string{"clustered-2", "scattered"}
-var fairDHTRequestCounts = []int{1, 16, 64, 256, 1024, 4096, 16384}
+var fairDHTRequestCounts = []int{1, 16, 64, 256, 1024, 4096}
 
 type fairDHTDatasetRecord struct {
 	SourceID string `json:"source_id"`
@@ -51,6 +53,7 @@ type fairDHTDatasetRecord struct {
 type fairDHTCase struct {
 	placement string
 	count     int
+	set       int // 1..5 for the native query set, 0 for clustered-2/scattered
 }
 
 // fairDHTPersistentFixture is deliberately small: encrypted tuples live in
@@ -60,6 +63,8 @@ type fairDHTPersistentFixture struct {
 	ca      *auth.CA
 	chain   *blockchain.Memory
 	batches map[fairDHTCase][]string
+	cases   []fairDHTCase // benchmark order
+	native  bool          // batches come from the native query set
 }
 
 type fairDHTAuthorities struct {
@@ -214,7 +219,14 @@ func buildFairDHTPersistentFixture(
 	config.EpochCapacity = recordCount
 	config.LogTypes = append([]string(nil), config.LogTypes...)
 	sort.Strings(config.LogTypes)
-	batches, err := fairDHTSelectedBatches(int(recordCount), segmentLeaves)
+	var batches map[fairDHTCase][]string
+	var cases []fairDHTCase
+	native := fairNativeQueriesDir() != ""
+	if native {
+		batches, cases, err = fairNativeDHTBatches(fairNativeQueriesDir(), int(recordCount))
+	} else {
+		batches, cases, err = fairDHTSelectedBatches(int(recordCount), segmentLeaves)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -281,23 +293,66 @@ func buildFairDHTPersistentFixture(
 	}
 
 	chain := blockchain.NewMemory()
-	if err := chain.Commit(ctx, fairDHTEpoch, mktree.RootOfRoots(roots)); err != nil {
+	root := mktree.RootOfRoots(roots)
+	if err := chain.Commit(ctx, fairDHTEpoch, root); err != nil {
 		return nil, err
+	}
+	if err := saveCloudDemoDHTTrust(datasetPath, workDir, root, recordCount); err != nil {
+		return nil, fmt.Errorf("save dashboard DHT-backed trusted state: %w", err)
 	}
 	return &fairDHTPersistentFixture{
 		config:  config,
 		ca:      authorities.ca,
 		chain:   chain,
 		batches: batches,
+		cases:   cases,
+		native:  native,
 	}, nil
 }
 
+// fairDHTIngestChunk is a run of consecutive dataset lines starting at ordinal
+// first; seq orders chunks for the collector.
+type fairDHTIngestChunk struct {
+	seq   int
+	first uint64
+	lines [][]byte
+}
+
+// fairDHTPrepared is one record after the order-independent work: decoding,
+// encryption, signing and the ingestion gate. LeafIndex is assigned later, in
+// dataset order.
+type fairDHTPrepared struct {
+	regionID string
+	record   storage.Record
+}
+
+type fairDHTPreparedChunk struct {
+	seq     int
+	records []fairDHTPrepared
+}
+
+const fairDHTIngestChunkLines = 512
+
+// fairDHTRecordWriter is the part of the PostgreSQL store ingestion writes to.
+type fairDHTRecordWriter interface {
+	CopyRecords(ctx context.Context, records []storage.Record) error
+}
+
+// ingestFairDHTDataset encrypts, signs and validates every dataset record and
+// stores it, assigning each log type's leaf indices in dataset order. Setup
+// only (outside every timer): the order-independent per-record work runs on
+// GOMAXPROCS workers (raised to the CPU count during setup), and a single
+// collector restores dataset order before anything order-dependent happens --
+// the region-order check, the per-type leaf index, the digest spool and the
+// PostgreSQL batches -- so the stored records, their leaf indices and the
+// spooled digests are exactly those of a one-record-at-a-time loop. COPY runs
+// on its own goroutine so database writes overlap the cryptographic work.
 func ingestFairDHTDataset(
 	ctx context.Context,
 	path string,
 	expected uint64,
 	authorities *fairDHTAuthorities,
-	store *storage.Postgres,
+	store fairDHTRecordWriter,
 	spool *fairDigestSpool,
 ) (map[string]uint64, error) {
 	file, err := os.Open(path)
@@ -306,100 +361,217 @@ func ingestFairDHTDataset(
 	}
 	defer file.Close()
 
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var failOnce sync.Once
+	var failure error
+	fail := func(err error) {
+		failOnce.Do(func() { failure = err; cancel() })
+	}
+	workers := max(1, runtime.GOMAXPROCS(0))
+
+	// Reader: consecutive lines in chunks.
+	chunks := make(chan fairDHTIngestChunk, 2*workers)
+	var readerDone sync.WaitGroup
+	readerDone.Add(1)
+	go func() {
+		defer readerDone.Done()
+		defer close(chunks)
+		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 64*1024), fairDHTScannerMax)
+		chunk := fairDHTIngestChunk{lines: make([][]byte, 0, fairDHTIngestChunkLines)}
+		var next uint64
+		send := func() bool {
+			select {
+			case chunks <- chunk:
+			case <-ctx.Done():
+				return false
+			}
+			chunk = fairDHTIngestChunk{seq: chunk.seq + 1, first: next, lines: make([][]byte, 0, fairDHTIngestChunkLines)}
+			return true
+		}
+		for scanner.Scan() {
+			chunk.lines = append(chunk.lines, append([]byte(nil), scanner.Bytes()...))
+			next++
+			if len(chunk.lines) == fairDHTIngestChunkLines && !send() {
+				return
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			fail(err)
+			return
+		}
+		if len(chunk.lines) > 0 {
+			send()
+		}
+	}()
+
+	// Workers: decode, encrypt, sign and validate (no shared mutable state:
+	// random nonces, a stateless AEAD, read-only key maps).
+	prepared := make(chan fairDHTPreparedChunk, 2*workers)
+	var workersDone sync.WaitGroup
+	for range workers {
+		workersDone.Add(1)
+		go func() {
+			defer workersDone.Done()
+			for chunk := range chunks {
+				out := fairDHTPreparedChunk{seq: chunk.seq, records: make([]fairDHTPrepared, len(chunk.lines))}
+				for offset, line := range chunk.lines {
+					record, regionID, err := prepareFairDHTRecord(line, chunk.first+uint64(offset), authorities)
+					if err != nil {
+						fail(err)
+						return
+					}
+					out.records[offset] = fairDHTPrepared{regionID: regionID, record: record}
+				}
+				select {
+				case prepared <- out:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+	go func() {
+		workersDone.Wait()
+		close(prepared)
+	}()
+
+	// Writer: PostgreSQL COPY batches, in order.
+	copies := make(chan []storage.Record, 2)
+	var writerDone sync.WaitGroup
+	writerDone.Add(1)
+	go func() {
+		defer writerDone.Done()
+		for batch := range copies {
+			if ctx.Err() != nil {
+				continue // drain after a failure
+			}
+			if err := store.CopyRecords(ctx, batch); err != nil {
+				fail(err)
+			}
+		}
+	}()
+
+	// Collector: dataset order for everything order-dependent.
 	counts := make(map[string]uint64, len(spool.paths))
 	batch := make([]storage.Record, 0, fairDHTCopyBatchSize)
-	flush := func() error {
-		if err := store.CopyRecords(ctx, batch); err != nil {
-			return err
+	pending := map[int][]fairDHTPrepared{}
+	nextSeq, region := 0, -1
+	var index uint64
+	collect := func(records []fairDHTPrepared) error {
+		for _, item := range records {
+			if item.regionID != fmt.Sprintf("R%d", region) {
+				if item.regionID != fmt.Sprintf("R%d", region+1) {
+					return fmt.Errorf(
+						"shared dataset record %d has region %q; records must be grouped R0, R1, ... in order",
+						index, item.regionID,
+					)
+				}
+				region++
+			}
+			record := item.record
+			record.LeafIndex = counts[record.LogType]
+			counts[record.LogType]++
+			if err := spool.Append(record.LogType, record.D); err != nil {
+				return err
+			}
+			batch = append(batch, record)
+			if len(batch) == cap(batch) {
+				select {
+				case copies <- batch:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				batch = make([]storage.Record, 0, fairDHTCopyBatchSize)
+			}
+			index++
 		}
-		clear(batch)
-		batch = batch[:0]
 		return nil
 	}
-
-	region := -1
-	var index uint64
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), fairDHTScannerMax)
-	for scanner.Scan() {
-		var input fairDHTDatasetRecord
-		if err := json.Unmarshal(scanner.Bytes(), &input); err != nil {
-			return nil, fmt.Errorf("decode shared dataset record %d: %w", index, err)
+	for chunk := range prepared {
+		if ctx.Err() != nil {
+			continue // drain so the workers can exit
 		}
-		if input.SourceID == "" || input.RawLog == "" || input.TenantID == "" {
-			return nil, fmt.Errorf("invalid shared dataset record %d", index)
-		}
-		if input.RegionID != fmt.Sprintf("R%d", region) {
-			if input.RegionID != fmt.Sprintf("R%d", region+1) {
-				return nil, fmt.Errorf(
-					"shared dataset record %d has region %q; records must be grouped R0, R1, ... in order",
-					index, input.RegionID,
-				)
-			}
-			region++
-		}
-
-		sourceDigest := sha256.Sum256([]byte(input.SourceID))
-		logType := producer.LogTypes[int(sourceDigest[0])%len(producer.LogTypes)]
-		producerID := producer.IDForLogType(logType)
-		privateKey, ok := authorities.private[producerID]
-		if !ok {
-			return nil, fmt.Errorf("fair DHT: no signing key for %s", producerID)
-		}
-		record := encryptor.Record{
-			RecordID:       encryptor.FormatRecordID(index),
-			ProducerID:     producerID,
-			LogType:        logType,
-			TimestampNanos: fairDHTTimestamp(input.RawLog, index),
-			Message:        input.RawLog,
-			Attributes: encryptor.Attributes{
-				Host: input.RegionID, RequestID: input.SourceID,
-				SourceIP: input.TenantID, Status: "openstack",
-			},
-		}
-		emitted, err := authorities.encryptor.ProcessRecord(record, privateKey)
-		if err != nil {
-			return nil, fmt.Errorf("encrypt record %d: %w", index, err)
-		}
-		if err := authorities.gate.Validate(emitted); err != nil {
-			return nil, fmt.Errorf("validate record %d: %w", index, err)
-		}
-		leafIndex := counts[logType]
-		counts[logType]++
-		batch = append(batch, storage.Record{
-			RecordID:          record.RecordID,
-			Epoch:             fairDHTEpoch,
-			LogType:           logType,
-			LeafIndex:         leafIndex,
-			ProducerID:        producerID,
-			TimestampNanos:    record.TimestampNanos,
-			C:                 emitted.C,
-			T:                 emitted.T,
-			AD:                emitted.AD,
-			D:                 emitted.D,
-			Sigma:             emitted.Sigma,
-			ProducerPublicKey: emitted.ProducerPublicKey,
-		})
-		if err := spool.Append(logType, emitted.D); err != nil {
-			return nil, err
-		}
-		if len(batch) >= cap(batch) {
-			if err := flush(); err != nil {
-				return nil, err
+		pending[chunk.seq] = chunk.records
+		for records, ok := pending[nextSeq]; ok; records, ok = pending[nextSeq] {
+			delete(pending, nextSeq)
+			nextSeq++
+			if err := collect(records); err != nil {
+				fail(err)
+				break
 			}
 		}
-		index++
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+	if ctx.Err() == nil && len(batch) > 0 {
+		copies <- batch
+	}
+	close(copies)
+	writerDone.Wait()
+	readerDone.Wait()
+	// Every goroutine has finished (channels closed, WaitGroups waited), so
+	// failure is safe to read.
+	if failure != nil {
+		return nil, failure
+	}
+	if len(pending) != 0 {
+		return nil, fmt.Errorf("fair DHT: %d chunks were never collected", len(pending))
 	}
 	if index != expected {
 		return nil, fmt.Errorf("fair DHT: ingested %d records, counted %d", index, expected)
 	}
-	if err := flush(); err != nil {
-		return nil, err
-	}
 	return counts, nil
+}
+
+// prepareFairDHTRecord is the order-independent part of ingesting record
+// index: decode it, encrypt and sign it as its log type's producer, and pass
+// it through the ingestion gate. LeafIndex is left for the collector.
+func prepareFairDHTRecord(line []byte, index uint64, authorities *fairDHTAuthorities) (storage.Record, string, error) {
+	var input fairDHTDatasetRecord
+	if err := json.Unmarshal(line, &input); err != nil {
+		return storage.Record{}, "", fmt.Errorf("decode shared dataset record %d: %w", index, err)
+	}
+	if input.SourceID == "" || input.RawLog == "" || input.TenantID == "" {
+		return storage.Record{}, "", fmt.Errorf("invalid shared dataset record %d", index)
+	}
+	sourceDigest := sha256.Sum256([]byte(input.SourceID))
+	logType := producer.LogTypes[int(sourceDigest[0])%len(producer.LogTypes)]
+	producerID := producer.IDForLogType(logType)
+	privateKey, ok := authorities.private[producerID]
+	if !ok {
+		return storage.Record{}, "", fmt.Errorf("fair DHT: no signing key for %s", producerID)
+	}
+	record := encryptor.Record{
+		RecordID:       encryptor.FormatRecordID(index),
+		ProducerID:     producerID,
+		LogType:        logType,
+		TimestampNanos: fairDHTTimestamp(input.RawLog, index),
+		Message:        input.RawLog,
+		Attributes: encryptor.Attributes{
+			Host: input.RegionID, RequestID: input.SourceID,
+			SourceIP: input.TenantID, Status: "openstack",
+		},
+	}
+	emitted, err := authorities.encryptor.ProcessRecord(record, privateKey)
+	if err != nil {
+		return storage.Record{}, "", fmt.Errorf("encrypt record %d: %w", index, err)
+	}
+	if err := authorities.gate.Validate(emitted); err != nil {
+		return storage.Record{}, "", fmt.Errorf("validate record %d: %w", index, err)
+	}
+	return storage.Record{
+		RecordID:          record.RecordID,
+		Epoch:             fairDHTEpoch,
+		LogType:           logType,
+		ProducerID:        producerID,
+		TimestampNanos:    record.TimestampNanos,
+		C:                 emitted.C,
+		T:                 emitted.T,
+		AD:                emitted.AD,
+		D:                 emitted.D,
+		Sigma:             emitted.Sigma,
+		ProducerPublicKey: emitted.ProducerPublicKey,
+	}, input.RegionID, nil
 }
 
 func fairDHTTimestamp(raw string, index uint64) int64 {
@@ -770,20 +942,22 @@ func fairDHTBatchPositions(total int, segmentLeaves int, placement string, count
 	return positions, nil
 }
 
-func fairDHTSelectedBatches(total int, segmentLeaves int) (map[fairDHTCase][]string, error) {
+func fairDHTSelectedBatches(total int, segmentLeaves int) (map[fairDHTCase][]string, []fairDHTCase, error) {
 	batches := make(map[fairDHTCase][]string, len(fairDHTPlacements)*len(fairDHTRequestCounts))
+	cases := make([]fairDHTCase, 0, len(fairDHTPlacements)*len(fairDHTRequestCounts))
 	for _, placement := range fairDHTPlacements {
 		for _, count := range fairDHTRequestCounts {
 			positions, err := fairDHTBatchPositions(total, segmentLeaves, placement, count)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			ids := make([]string, len(positions))
 			for index, position := range positions {
 				ids[index] = encryptor.FormatRecordID(uint64(position))
 			}
 			batches[fairDHTCase{placement: placement, count: count}] = ids
+			cases = append(cases, fairDHTCase{placement: placement, count: count})
 		}
 	}
-	return batches, nil
+	return batches, cases, nil
 }

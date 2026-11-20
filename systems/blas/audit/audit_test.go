@@ -162,6 +162,11 @@ func TestNoExperimentConstantsInProtocolPackages(t *testing.T) {
 		if strings.HasPrefix(filepath.ToSlash(rel), "cmd/") {
 			continue
 		} // CLI defaults are configurable, not protocol constants.
+		// The durable adapter's default prefetch-cache size is a resource bound
+		// (overridden by Execution.CacheMaxEntries), not a §12 experiment constant.
+		if filepath.ToSlash(rel) == "internal/durable/generator_keywords.go" {
+			continue
+		}
 		f, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
 			t.Fatalf("parsing %s: %v", path, err)

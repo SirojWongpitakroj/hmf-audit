@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	gocql "github.com/apache/cassandra-gocql-driver/v2"
 )
@@ -306,14 +307,40 @@ func (dht *fairEVBESCassandraDHT) putBatch(ctx context.Context,
 	if len(entries) == 0 {
 		return nil
 	}
-	batch := dht.session.Batch(gocql.UnloggedBatch)
-	for _, entry := range entries {
-		batch.Query(fairEVBESDHTInsert, entry.key, entry.hash[:])
+	// Setup only. The inserts are idempotent, so a transient Cassandra failure (a write timeout
+	// while the node is busy, for example right after the TRUNCATE of the previous run's
+	// entries) is retried with a growing pause; any other error stops the seeding at once.
+	var err error
+	for attempt := 1; attempt <= fairEVBESSeedWriteAttempts; attempt++ {
+		batch := dht.session.Batch(gocql.UnloggedBatch)
+		for _, entry := range entries {
+			batch.Query(fairEVBESDHTInsert, entry.key, entry.hash[:])
+		}
+		if err = batch.ExecContext(ctx); err == nil || !fairEVBESTransientWriteError(err) ||
+			attempt == fairEVBESSeedWriteAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(min(time.Duration(1<<(attempt-1))*200*time.Millisecond, 10*time.Second)):
+		}
 	}
-	if err := batch.ExecContext(ctx); err != nil {
+	if err != nil {
 		return fmt.Errorf("write %d EVSEB DHT entries: %w", len(entries), err)
 	}
 	return nil
+}
+
+// fairEVBESSeedWriteAttempts bounds the retries of one setup batch (about a minute in total).
+const fairEVBESSeedWriteAttempts = 10
+
+func fairEVBESTransientWriteError(err error) bool {
+	var timeout *gocql.RequestErrWriteTimeout
+	var unavailable *gocql.RequestErrUnavailable
+	var overloaded *gocql.RequestErrOverloaded
+	return errors.As(err, &timeout) || errors.As(err, &unavailable) ||
+		errors.As(err, &overloaded) || errors.Is(err, gocql.ErrTimeoutNoResponse)
 }
 
 // fairEVBESDHTSeeder bounds setup-time writes while the dataset continues to
