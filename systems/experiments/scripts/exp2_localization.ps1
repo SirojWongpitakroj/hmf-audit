@@ -1,6 +1,6 @@
 # Experiment 2: tamper detection and localization latency of HMF-Audit and
 # EVSEB. One requested record (the middle one) is tampered in PostgreSQL;
-# q = 1..16384 on clustered-2 and scattered requests. Raw output, trial CSV,
+# q = 1..4096 on clustered-2 and scattered requests. Raw output, trial CSV,
 # summary CSV and Figure 2 are written to <output>\exp2_localization\.
 [CmdletBinding()]
 param(

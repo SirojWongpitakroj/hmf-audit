@@ -24,7 +24,7 @@ try {
     $env:FAIR_ABLATION_OUTPUT_DIR = $results
     $env:FAIR_ABLATION_WARMUP = [string]$Warmup
     $env:FAIR_ABLATION_MEASURED = [string]$Count
-    Write-Note "ablation: $Warmup warm-up + $Count measured rounds per variant (q = 256, 1024, 4096, 16384)"
+    Write-Note "ablation: $Warmup warm-up + $Count measured rounds per variant (q = 256, 1024, 4096)"
     Invoke-Native -What "the ablation" -Executable "go" -LogFile (Join-Path $results "ablation_run.log") `
         -WorkingDirectory (Join-Path $script:SystemsDir "hmf-audit") -Arguments @(
         "test", "./benchmarks/latency", "-run", "^TestFairHMFAblation$", "-v", "-count", "1", "-timeout", "0")

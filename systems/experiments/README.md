@@ -9,9 +9,9 @@ can be pointed at a remote database.
 
 | Script | Experiment | Output (in `<output>/<name>/`) |
 |---|---|---|
-| `exp1_verification` | Verification latency: HMF-Audit, DHT-backed, BLAS, EVSEB; clustered-2 and scattered; q = 1 … 16384 | raw `*.txt`, `latency_trials.csv`, `latency_summary.csv`, `figure1_verification_latency.png` |
-| `exp2_localization` | Tamper localization latency: HMF-Audit vs EVSEB, one tampered record; same q and placements | raw `*.txt`, `latency_trials.csv`, `latency_summary.csv`, `figure2_localization_latency.png` |
-| `exp3_ablation` | HMF-Audit ablation: Full, no shared planning, no deduplication, no partition-aware retrieval; q = 256 … 16384 | `ablation_latency_raw.csv`, `ablation_summary.csv`, `figure3_ablation_latency.png` |
+| `exp1_verification` | Verification latency: HMF-Audit, DHT-backed, BLAS, EVSEB; native clustered and scattered queries, 5 per cell; maximum q is 1024 for BLAS and EVSEB, 4096 for HMF-Audit and DHT-backed | raw `*.txt`, `latency_trials.csv`, `latency_summary.csv`, `figure1_verification_latency.png` |
+| `exp2_localization` | Tamper localization latency: HMF-Audit vs EVSEB, one tampered record; clustered-2 and scattered; q = 1 … 4096 | raw `*.txt`, `latency_trials.csv`, `latency_summary.csv`, `figure2_localization_latency.png` |
+| `exp3_ablation` | HMF-Audit ablation: Full, no shared planning, no deduplication, no partition-aware retrieval; q = 256 … 4096 | `ablation_latency_raw.csv`, `ablation_summary.csv`, `figure3_ablation_latency.png` |
 | `run_all` | Runs the three above in order, then compares with the earlier 10M results | all of the above, plus the comparison on the console |
 
 ## Usage
@@ -59,6 +59,59 @@ output, and (experiment 1 / runner only) systems. `run_all` also takes
 Requirements: Go 1.27, Docker with Compose, Python 3.9+ with `matplotlib`
 (figures only), and for a regenerated subset the 12 GB source file
 `dataset/combined/spark_uniform_combined.jsonl`.
+
+## Experiments 1 and 3: the native query set
+
+Experiment 1 (all four schemes) and experiment 3 (HMF-Audit ablation) run the
+query set in [`native-queries/`](native-queries/README.md), at q = 1, 16, 64,
+256, 1024, 4096 (experiment 1 omits 4096 for BLAS and EVSEB, and experiment 3 uses 256, 1024, 4096): five queries or batches per
+scheme, shape and q, timed separately and pooled per cell in the summary
+(`query_sets` = 5; the raw trials keep a `query_set` column).
+
+* **HMF-Audit**: native ALL queries (region R0, service, log type, `[from, to)`,
+  optional tenant). The fixture's ALL tree indexes every record under its real
+  attributes; each query is checked against the dataset before it is timed.
+* **BLAS**: closed time range `[ts, te]` plus a keyword expression over its
+  16-token vocabulary; the placeholder batch keywords are not indexed.
+* **DHT-backed**: clustered = q leaves of one MK-Tree subtree sharing ancestor
+  certificates; scattered = as many (log type, ancestor) pairs as exist.
+* **EVSEB**: clustered = q consecutive leaves (one subtree); scattered = every
+  leaf under a different branch.
+
+Benchmarks are named `<shape>/q=<q>/set=<1..5>` and report
+`workload-version/op` 9. Experiment 2 keeps the clustered-2/scattered requests.
+
+## Shard-count study (HMF-Audit)
+
+How many shards per region HMF-Audit should use is measured in two steps; the experiments themselves
+use 4 (`SHARDS_PER_REGION` in `scripts/lib.sh`).
+
+1. **Structural, no database** (seconds): the real HPP planner plans the native queries of a query set for
+   each shard count and counts shards, segments, Cassandra requests and fetched nodes:
+
+   ```bash
+   cd systems/hmf-audit
+   FAIR_QUERY_DIR=../experiments/native-queries/<set> FAIR_SHARD_SWEEP=1,2,4,8,16,32,64 \
+   FAIR_SHARD_PLAN_OUT=plan.csv go test ./benchmarks/latency -run TestFairHMFShardPlan -v
+   ```
+
+   It shows what a shard count changes in the proof (it does not change the nodes fetched; it changes
+   how many shards, partitions and upper-layer requests a query touches), not what that costs in time.
+2. **Real implementation** (`scripts/exp_shards.sh`): for every shard count the HMF fixture is seeded with that
+   many shards per region on the real databases and the native verification benchmark is timed on the
+   chosen cells. `shard_sweep_summary.py` gives p50 and p95 per cell and shard count, the best count per
+   cell, and the geometric mean of p50 over the best p50 as the overall ranking (ties within 5%).
+
+   ```bash
+   cd systems/experiments/scripts
+   FAIR_CLOUD=1 FAIR_QUERY_SET=<set> bash ./exp_shards.sh --shards 1,2,4,8 --q-list 64,256,1024,4096 \
+       --count 10 --warmup 3 --dataset <jsonl> --output <results folder>
+   ```
+
+   Each shard count re-seeds the fixture, so the sweep costs (setup + run) per count (about 35 minutes of
+   setup at 10M records). The order can bias the result through the database VMs' cache state: if two
+   counts are close, repeat the sweep with `--shards` reversed into another `--output` and pass both
+   folders to `shard_sweep_summary.py`.
 
 ## What is fixed (the deterministic part)
 
@@ -150,16 +203,22 @@ seeding, lower `FAIR_HMF_SEED_CONCURRENCY`.
 
 ## Known limitations
 
-* **DHT-backed is capped at q = 2048 (so it runs q = 1..1024).** `systems/dht-backed`
-  now has working-memory bounds (`internal/cassandradht/limits.go`: 8 MiB of proof
-  bytes and 32,768 requests per call by default) that did not exist when the earlier
-  10M results were produced. With the fixed placements, q = 4096 needed about 21,000
-  proof lookups and was rejected ("proof/result map byte bound exceeded"), and
-  q = 16384 exceeded the request-count bound. Experiment 1 now measures DHT-backed
-  only up to `FAIR_DHT_MAX_Q` (default 2048); the other systems run q = 1..4096.
-  The scattered batches at q = 4096 would need about 53,800 lookups (more than both
-  bounds); the clustered ones need about 8,200 and would fit, so raising
-  `FAIR_DHT_MAX_Q` only helps if the scattered batches are skipped as well.
+* **DHT-backed limits are raised for the benchmark.** `systems/dht-backed`
+  bounds each proof call (`internal/cassandradht/limits.go`: 32,768 requests,
+  8 MiB of proof bytes by default). The largest native batch (scattered
+  q = 4096) needs about 53,800 proof lookups, so the benchmark gives the
+  Cassandra DHT client 65,536 requests, 64 MiB of proof bytes and 128 MiB of
+  ancestor map (`FAIR_DHT_MAX_REQUESTS`, `FAIR_DHT_PROOF_BYTES`,
+  `FAIR_DHT_ANCESTOR_MAP_BYTES` override them). The scheme's defaults are
+  unchanged; the values are in `environment.txt` and in every result line.
+* **HMF-Audit tenant queries authenticate the whole range.** HMF-Audit's ALL
+  range does not include the tenant: it is resolved and proven over every
+  tenant, and a named tenant is filtered afterwards. For the native queries
+  that name a tenant the authenticated range is much larger than q (about
+  1.1M entries at scattered q = 1024); `all-entries/op` records it.
+* **Native queries need the 10M dataset.** They were found on the pinned 10M
+  subset, so experiments 1 and 3 (whose HMF-Audit fixture indexes the real
+  attributes) do not run on the 100k subset.
 * Memory: Cassandra uses about 3 GB and the fixtures several GB more. On a
   machine with little free memory, close other containers first.
 

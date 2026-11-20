@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Any
 
 
-REQUEST_COUNTS = (1, 16, 64, 256, 1024, 4096, 16384)
+# FAIR_MAX_REQUEST_Q (set by exp2_localization.sh --q-list) caps the fixed-placement q values, so a study
+# limited to q <= 4096 is validated against exactly the cells it ran.
+REQUEST_COUNTS = tuple(q for q in (1, 16, 64, 256, 1024, 4096, 16384)
+                       if q <= int(os.environ.get("FAIR_MAX_REQUEST_Q", "16384")))
 PLACEMENTS = ("clustered-2", "scattered")
 PLACEMENT_TITLES = {
     "clustered-2": "Clustered Requested IDs",
@@ -604,7 +607,10 @@ def build_workload_manifest(
                 }
             workloads.append(workload)
 
-    if not verification_only:
+    # The fixed-batch tamper-count workloads belong to q = TAMPER_COUNT_BATCH_SIZE; a study capped below
+    # that q (FAIR_MAX_REQUEST_Q) does not run them, so the manifest does not list them either.
+    with_tamper_count = not verification_only and TAMPER_COUNT_BATCH_SIZE in REQUEST_COUNTS
+    if with_tamper_count:
         for placement in PLACEMENTS:
             ordinals = selections[(placement, TAMPER_COUNT_BATCH_SIZE)]
             requested = [source_ids[index] for index in ordinals]
@@ -654,10 +660,10 @@ def build_workload_manifest(
         "benchmark_parameters": {
             "requested_counts_q": list(REQUEST_COUNTS),
             "tamper_count_experiment_batch_size_q": (
-                None if verification_only else TAMPER_COUNT_BATCH_SIZE
+                TAMPER_COUNT_BATCH_SIZE if with_tamper_count else None
             ),
             "tamper_count_experiment_values": (
-                [] if verification_only else list(TAMPER_COUNTS)
+                list(TAMPER_COUNTS) if with_tamper_count else []
             ),
             "query_distributions": list(PLACEMENTS),
             "measured_repetitions": expected_repetitions,

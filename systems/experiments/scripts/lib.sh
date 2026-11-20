@@ -24,7 +24,7 @@ winpath() {
 
 # ------------------------------------------------------------ fixed protocol
 REGIONS=4
-SHARDS_PER_REGION=1
+SHARDS_PER_REGION="${FAIR_SHARDS_PER_REGION:-4}"   # HMF-Audit shards per region (see exp_shards.sh)
 SEGMENT_LEAVES=8192
 HPP_CONCURRENCY=8
 EVSEB_DHT_CONCURRENCY=8
@@ -102,7 +102,7 @@ parse_args() {
     OUTPUT="$(cd "$OUTPUT" && pwd)"
     # q = 2^14 needs two full 8,192-leaf segments in R0 and a scattered window
     # across R1..R3 wider than three segments.
-    (( PER_REGION >= 16384 )) || die "--per-region must be at least 16384 (clustered-2 at q=16384 needs two full segments in R0)"
+    (( PER_REGION >= 16384 )) || die "--per-region must be at least 16384 (the clustered-2 window is two full 8,192-leaf segments in R0)"
     (( PER_REGION * (REGIONS - 1) >= 3 * SEGMENT_LEAVES )) || die "subset too small for the scattered placement"
 }
 
@@ -183,11 +183,13 @@ start_services() {
 # so FAIR_QUERY_DIR is unset for them (export_fair_env). DHT-backed is capped at FAIR_DHT_MAX_Q
 # (default 2048, so it runs q = 1..1024) because of its working-memory bounds.
 use_native_queries() {
-    local dir="$EXP_DIR/native-queries/$RECORDS"
+    # FAIR_QUERY_SET names another query-set directory for the same record count (for example
+    # the one made for a dataset with a different tenant model); default: native-queries/<records>.
+    local dir="$EXP_DIR/native-queries/${FAIR_QUERY_SET:-$RECORDS}"
     [[ -f "$dir/R0_queries.json" && -f "$dir/dht_evseb_queries.json" && -f "$dir/dataset.sha256" ]]         || die "no query sets for $RECORDS records in $dir; generate them with: $PYTHON $EXP_DIR/native-queries/make_queries.py --dataset $DATASET --out $dir"
     [[ "$(tr -d '[:space:]' <"$dir/dataset.sha256")" == "$DATASET_SHA256" ]]         || die "the query sets in $dir were made for a different dataset than $DATASET (sha256 $DATASET_SHA256); regenerate them"
     export FAIR_QUERY_DIR="$(winpath "$dir")"
-    export FAIR_DHT_MAX_Q="${FAIR_DHT_MAX_Q:-2048}"
+    export FAIR_DHT_MAX_Q="${FAIR_DHT_MAX_Q:-4096}"
     note "native query sets: $dir (DHT-backed capped at q=$FAIR_DHT_MAX_Q)"
 }
 
@@ -205,6 +207,14 @@ export_fair_env() {
     export FAIR_REGION0_RECORDS="$PER_REGION" FAIR_REGION1_RECORDS="$PER_REGION"
     export FAIR_EVSEB_DHT_CONCURRENCY="$EVSEB_DHT_CONCURRENCY" FAIR_DHT_CONCURRENCY="$DHT_CONCURRENCY"
     export FAIR_DHT_PEERS="$DHT_PEERS"
+    # Experiments 1 and 3 run the native query set, which was found on the
+    # pinned 10M dataset (systems/experiments/native-queries); the fixtures
+    # check its record count. Experiment 2 keeps clustered-2/scattered.
+    if (( RECORDS == 10000000 )); then
+        export FAIR_NATIVE_QUERIES_DIR="$(winpath "$EXP_DIR/native-queries/${FAIR_QUERY_SET:-$RECORDS}")"
+    else
+        unset FAIR_NATIVE_QUERIES_DIR
+    fi
     # In the cloud each scheme's process gets its own endpoints (apply_endpoints),
     # so none of the local ones may leak through.
     if [[ "$CLOUD" == 1 ]]; then
@@ -254,8 +264,9 @@ run_benchmark() {
     local dir="$1" package="$2" pattern="$3" result="$4" status
     note "benchmark $pattern ($dir): count $COUNT, window $BENCHTIME, warm-up $WARMUP, GOMAXPROCS=1"
     set +e
+    # FAIR_GO_TEST_EXTRA: extra `go test` flags (e.g. -cpuprofile /abs/path) for profiling runs; never set for results.
     (apply_endpoints "$dir"; cd "$SYSTEMS_DIR/$dir" && go test -run '^$' -bench "$pattern" -benchmem -count "$COUNT" \
-        -benchtime "$BENCHTIME" -cpu 1 -timeout 0 "$package") 2>&1 | tee "$result"
+        -benchtime "$BENCHTIME" -cpu 1 -timeout 0 ${FAIR_GO_TEST_EXTRA:-} "$package") 2>&1 | tee "$result"
     status=${PIPESTATUS[0]}
     set -e
     [[ $status -eq 0 ]] || die "$dir benchmark failed (exit $status); see $result"

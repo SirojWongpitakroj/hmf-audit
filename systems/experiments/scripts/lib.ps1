@@ -120,7 +120,7 @@ function Set-Settings {
     $script:PerRegion = [int]$PerRegion
     $script:RecordCount = $script:PerRegion * $script:Regions
     if ($script:PerRegion -lt 16384) {
-        throw "-PerRegion must be at least 16384 (clustered-2 at q=16384 needs two full segments in R0)"
+        throw "-PerRegion must be at least 16384 (the clustered-2 window is two full 8,192-leaf segments in R0)"
     }
     if ($script:PerRegion * ($script:Regions - 1) -lt 3 * $script:SegmentLeaves) {
         throw "subset too small for the scattered placement"

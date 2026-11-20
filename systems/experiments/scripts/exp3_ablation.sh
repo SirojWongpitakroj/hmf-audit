@@ -11,9 +11,10 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 begin_experiment exp3_ablation "$@"
+use_native_queries   # the ablation runs the native HMF-Audit queries, so the ALL tree must index the real attributes
 
 write_environment exp3_ablation "hmf-audit" "$RESULTS"
-note "ablation: $WARMUP warm-up + $COUNT measured rounds per variant (q = 256, 1024, 4096, 16384)"
+note "ablation: $WARMUP warm-up + $COUNT measured rounds per variant (q = 256, 1024, 4096)"
 set +e
 (apply_endpoints hmf-audit; cd "$SYSTEMS_DIR/hmf-audit" && FAIR_ABLATION=1 FAIR_ABLATION_OUTPUT_DIR="$(winpath "$RESULTS")" \
     FAIR_ABLATION_WARMUP="$WARMUP" FAIR_ABLATION_MEASURED="$COUNT" \

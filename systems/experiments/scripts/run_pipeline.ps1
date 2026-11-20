@@ -18,7 +18,7 @@
 # deterministic 100k subset (a dry run before committing to the 10M run).
 #
 # The default systems for experiment 1 are hmf-audit,blas,evseb: dht-backed is
-# rejected by its own memory bounds at q = 4096 and 16384 (see README.md, "Known
+# rejected by its own memory bounds at q = 4096 (see README.md, "Known
 # limitations"), which would stop the run. Add it back with
 # -Systems hmf-audit,dht-backed,blas,evseb if that has been resolved.
 #

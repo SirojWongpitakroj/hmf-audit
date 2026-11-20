@@ -1,5 +1,5 @@
 # Experiment 1: verification latency of HMF-Audit, DHT-backed, BLAS and EVSEB
-# on clustered-2 and scattered requests of q = 1..16384 records, over honest
+# on clustered-2 and scattered requests of q = 1..4096 records, over honest
 # storage. Raw `go test -bench` output, trial CSV, summary CSV and Figure 1
 # are written to <output>\exp1_verification\.
 [CmdletBinding()]

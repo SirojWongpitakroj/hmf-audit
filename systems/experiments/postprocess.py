@@ -66,7 +66,8 @@ def native_environment_lines(args: argparse.Namespace) -> list[str]:
     """Request sizes and query selection: the native query sets, or the fixed placements."""
     query_dir = getattr(args, "query_dir", None)
     if not query_dir:
-        return ["requested_counts=1,16,64,256,1024,4096,16384", "query_distributions=clustered-2,scattered"]
+        counts = [q for q in (1, 16, 64, 256, 1024, 4096, 16384) if q <= int(os.environ.get("FAIR_MAX_REQUEST_Q", "16384"))]
+        return [f"requested_counts={','.join(map(str, counts))}", "query_distributions=clustered-2,scattered"]
     return [
         "requested_counts=1,16,64,256,1024,4096",
         "query_distributions=clustered,scattered",
@@ -224,6 +225,7 @@ def run_exp3(args: argparse.Namespace) -> None:
     if not raw.exists():
         raise SystemExit(f"missing {raw}")
     groups: dict[tuple[str, str, int], list[dict[str, str]]] = defaultdict(list)
+    query_sets: dict[tuple[str, int], set[str]] = defaultdict(set)
     warmups = 0
     with raw.open(newline="", encoding="utf-8") as source:
         for row in csv.DictReader(source):
@@ -233,15 +235,22 @@ def run_exp3(args: argparse.Namespace) -> None:
             if row["verification_success"].lower() != "true":
                 raise SystemExit("an ablation measurement did not verify; refusing to summarize")
             groups[(row["variant"], row["distribution"], int(row["q"]))].append(row)
+            query_sets[(row["distribution"], int(row["q"]))].add(row.get("query_set", "1"))
     if not groups:
         raise SystemExit("ablation CSV has no measured rows")
     sizes = sorted({q for (_, _, q) in groups})
+    # The fixed placements are clustered-2 and scattered; the native query sets are clustered and
+    # scattered, with several query sets per cell whose measured rounds are pooled.
+    present = {distribution for (_, distribution, _) in groups}
+    distributions = [d for d in ("clustered-2", "clustered", "scattered") if d in present]
+    titles = {**DISTRIBUTION_TITLES, "clustered": "Clustered Requested IDs"}
     for variant in ABLATION_VARIANTS:
-        for distribution in DISTRIBUTIONS:
+        for distribution in distributions:
             for q in sizes:
                 count = len(groups.get((variant, distribution, q), []))
-                if count != args.count:
-                    raise SystemExit(f"{variant}/{distribution}/q={q}: {count} measured rows, expected {args.count}")
+                expected = args.count * max(1, len(query_sets.get((distribution, q), ())))
+                if count != expected:
+                    raise SystemExit(f"{variant}/{distribution}/q={q}: {count} measured rows, expected {expected}")
 
     rows = []
     for (variant, distribution, q), samples in sorted(groups.items()):
@@ -276,8 +285,9 @@ def run_exp3(args: argparse.Namespace) -> None:
     except ImportError:
         print("matplotlib is not installed; ablation_summary.csv written, figure skipped")
         return
-    fig, axes = plt.subplots(1, len(DISTRIBUTIONS), figsize=(12, 5.5), sharey=True)
-    for axis, distribution in zip(axes, DISTRIBUTIONS):
+    fig, axes = plt.subplots(1, len(distributions), figsize=(12, 5.5), sharey=True, squeeze=False)
+    axes = axes[0]
+    for axis, distribution in zip(axes, distributions):
         for variant in ABLATION_VARIANTS:
             points = sorted((r for r in rows if r["variant"] == variant and r["distribution"] == distribution),
                             key=lambda r: r["q"])
@@ -291,7 +301,7 @@ def run_exp3(args: argparse.Namespace) -> None:
         axis.set_xticks(sizes)
         axis.set_xticklabels([f"$2^{{{int(math.log2(q))}}}$" for q in sizes])
         axis.set_xlabel("Requested records, q")
-        axis.set_title(DISTRIBUTION_TITLES[distribution])
+        axis.set_title(titles[distribution])
         axis.grid(True, which="major", alpha=0.25)
         axis.legend(loc="upper left", fontsize=9)
     axes[0].set_ylabel("Latency (ms, log scale): P50, whisker to P95")
