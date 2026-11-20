@@ -23,6 +23,30 @@ Found on the pinned 10,000,000-record subset (SHA-256 `a8fa53db…`), region **R
 * **q = 1** is one log: "clustered" takes logs from the first segments, "scattered" takes the log nearest 10%, 30%, 50%, 70% and 90% of the region.
 * **Checked against the real systems at 100k only.** Counts and positions were computed from the dataset with the same rules the fixtures use. Experiment 1 re-checks every HMF-Audit and BLAS result against the query file at run time; this has run end to end on the 100k set, not yet on the 10M set.
 
+## BLAS queries shaped like HMF-Audit's (`10000000-skewed-attr/`)
+
+The BLAS queries above name a keyword from a 16-word vocabulary. To give BLAS the same query as HMF-Audit, the
+fair BLAS fixture can also store the four attributes an HMF-Audit range query names as keywords of every entry
+(`tenant=T3`, `service=spark-executor`, `type=INFO`, `region=R0`; `FAIR_BLAS_ATTRIBUTES`, default on) and stamp
+each log with its dataset **event time** in milliseconds, ingesting each region in event-time order (the
+dataset's event time goes backwards between consecutive records 0.10% of the time, so file order is not time
+order, and an ordinal window selected the wrong logs for 25 of the 60 HMF-Audit queries). A BLAS query is then the
+AND of the four keywords and the time range `[from * 1000, to * 1000 + 999]`, which selects exactly the logs the
+HMF-Audit range query selects.
+
+`derive_blas_attribute_queries.py <set dir> <new set dir> --dataset <jsonl>` writes the new set: the HMF-Audit and
+DHT-backed/EVSEB entries are copied unchanged and every BLAS entry is derived from the HMF-Audit entry with the
+same shape, q and set (`"layout": "event_time"`, `record_times_ms`). It re-reads the dataset and stops unless
+each query's group and time range select exactly the HMF-Audit record list. Select the set with
+`FAIR_QUERY_SET=10000000-skewed-attr`; the loader refuses to mix an event-time set with the ordinal fixture
+(`FAIR_BLAS_ATTRIBUTES=0`) and the other way round.
+
+In BLAS's own layout (event-time order; file = 128 logs, block = 8 files, segment = 8 blocks) the derived
+clustered queries touch 1 to 4 segments and the scattered ones 12 to 209, so they stay clustered and scattered.
+A query that names a rare group over a long window is slow in BLAS (about 2 s at q = 16 scattered): its block
+index records per block which keywords occur anywhere in the block, and four common keywords leave almost every
+block a candidate. HMF-Audit's ALL index is ordered by the same four attributes, so the window does not matter.
+
 ## Summary (segments touched / span of region, per query)
 
 | scheme | shape | q=1 | q=16 | q=64 | q=256 | q=1024 | q=4096 |
