@@ -38,6 +38,7 @@ NATIVE: dict[str, Any] | None = None
 NATIVE_PLACEMENTS = ("clustered", "scattered")
 NATIVE_PLACEMENT_TITLES = {"clustered": "Clustered batches", "scattered": "Scattered batches"}
 NATIVE_WORKLOAD_VERSION = 9
+HMF_SOURCED_SCHEMES = ("DHT-backed", "EVSEB")  # audit the HMF-Audit records with --records-from-hmf
 NATIVE_SCHEME_FILES = (
     ("R0_queries.json", ("HMF-Audit", "BLAS")),
     ("dht_evseb_queries.json", ("DHT-backed", "EVSEB")),
@@ -59,8 +60,11 @@ def native_sets(system: str, placement: str, q: int) -> list[int]:
     return NATIVE["cells"].get((system, placement, q), []) if NATIVE is not None else []
 
 
-def load_native(query_dir: Path, max_q: dict[str, int]) -> dict[str, Any]:
-    """Read the query files: cells[(system, shape, q)] = sorted set numbers."""
+def load_native(query_dir: Path, max_q: dict[str, int], from_hmf: bool = False) -> dict[str, Any]:
+    """Read the query files: cells[(system, shape, q)] = sorted set numbers.
+
+    from_hmf: DHT-backed and EVSEB audit the records of the HMF-Audit queries of R0_queries.json
+    (the same logs in every scheme) instead of their own batches of dht_evseb_queries.json."""
     cells: dict[tuple[str, str, int], list[int]] = defaultdict(list)
     files: dict[str, str] = {}
     records = None
@@ -71,16 +75,64 @@ def load_native(query_dir: Path, max_q: dict[str, int]) -> dict[str, Any]:
         data = json.loads(file_path.read_text(encoding="utf-8"))
         files[filename] = sha256_file(file_path)
         records = data.get("records", records)
-        for entry in data["queries"]:
-            if "note" in entry or entry["scheme"] not in schemes:
-                continue
+        for entry in native_entries(data, schemes, None, from_hmf):
             cap = max_q.get(entry["scheme"])
             if cap is not None and entry["q"] > cap:
                 continue
             cells[(entry["scheme"], entry["shape"], entry["q"])].append(entry["set"])
     for key in cells:
         cells[key].sort()
-    return {"dir": str(query_dir), "cells": dict(cells), "files": files, "records": records, "max_q": dict(max_q)}
+    return {"dir": str(query_dir), "cells": dict(cells), "files": files, "records": records,
+            "max_q": dict(max_q), "from_hmf": from_hmf}
+
+
+def native_entries(data: dict[str, Any], schemes: tuple[str, ...], systems: set[str] | None,
+                   from_hmf: bool) -> Any:
+    """The query-file entries of the given schemes, one per auditing scheme. With from_hmf an
+    HMF-Audit entry also stands for DHT-backed and EVSEB (the same records, in ascending ordinal
+    order, without the HMF-Audit query fields) and their own batches are skipped."""
+    for source in data["queries"]:
+        if "note" in source or source["scheme"] not in schemes:
+            continue
+        if from_hmf and source["scheme"] in HMF_SOURCED_SCHEMES:
+            continue
+        owners = [source["scheme"]]
+        if from_hmf and source["scheme"] == "HMF-Audit":
+            owners += list(HMF_SOURCED_SCHEMES)
+        for owner in owners:
+            if systems is not None and owner not in systems:
+                continue
+            entry = dict(source, scheme=owner)
+            if owner != source["scheme"]:
+                entry["record_ordinals"] = sorted(source["record_ordinals"])
+                for field in ("service", "log_type", "tenant", "time_range", "ranges"):
+                    entry.pop(field, None)
+            yield entry
+
+
+LOCALIZATION_SYSTEMS = ("HMF-Audit", "EVSEB")
+
+
+def load_native_localization(query_dir: Path, q_list: tuple[int, ...] | None = None) -> dict[str, Any]:
+    """Experiment 2 on the native query set: HMF-Audit and EVSEB both localize the records of
+    the HMF-Audit queries of R0_queries.json, so cells[(system, shape, q)] = the HMF-Audit sets.
+    q_list limits the q values (exp2_localization.sh --q-list)."""
+    file_path = query_dir / "R0_queries.json"
+    if not file_path.exists():
+        raise SystemExit(f"missing query file {file_path}; generate it with native-queries/make_queries.py")
+    data = json.loads(file_path.read_text(encoding="utf-8"))
+    cells: dict[tuple[str, str, int], list[int]] = defaultdict(list)
+    for entry in data["queries"]:
+        if "note" in entry or entry["scheme"] != "HMF-Audit":
+            continue
+        if q_list is not None and entry["q"] not in q_list:
+            continue
+        for system in LOCALIZATION_SYSTEMS:
+            cells[(system, entry["shape"], entry["q"])].append(entry["set"])
+    for key in cells:
+        cells[key].sort()
+    return {"dir": str(query_dir), "cells": dict(cells), "files": {"R0_queries.json": sha256_file(file_path)},
+            "records": data.get("records"), "max_q": {}, "localization": True}
 
 BENCHMARKS: dict[str, dict[str, Any]] = {
     "BenchmarkFairHMFVerificationCore": {
@@ -290,7 +342,7 @@ def validate_trials(
                 for placement in NATIVE_PLACEMENTS:
                     for q in request_counts_for(system):
                         for query_set in native_sets(system, placement, q):
-                            key = (benchmark, placement, q, 0, query_set)
+                            key = (benchmark, placement, q, 1 if BENCHMARKS[benchmark]["figure"] == 2 else 0, query_set)
                             expected_keys.add(key)
                             count = len(grouped.get(key, ()))
                             if count != expected_repetitions:
@@ -350,7 +402,8 @@ def validate_trials(
                 f"{row['source_file']}:{row['source_line']}: nonpositive iterations"
             )
         wanted_version = NATIVE_WORKLOAD_VERSION if NATIVE is not None else 8
-        if verification_only and row["metrics"].get("workload-version/op") != wanted_version:
+        native_localization = NATIVE is not None and NATIVE.get("localization", False)
+        if (verification_only or native_localization) and row["metrics"].get("workload-version/op") != wanted_version:
             errors.append(
                 f"{row['source_file']}:{row['source_line']}: missing v{wanted_version} workload marker; "
                 "raw trials from another query protocol select different records"
@@ -783,9 +836,7 @@ def apply_native_manifest(manifest: dict[str, Any], systems: set[str]) -> None:
     workloads = []
     for filename, schemes in NATIVE_SCHEME_FILES:
         data = json.loads((Path(NATIVE["dir"]) / filename).read_text(encoding="utf-8"))
-        for entry in data["queries"]:
-            if "note" in entry or entry["scheme"] not in schemes or entry["scheme"] not in systems:
-                continue
+        for entry in native_entries(data, schemes, systems, bool(NATIVE.get("from_hmf"))):
             if entry["q"] not in request_counts_for(entry["scheme"]):
                 continue
             ordinals = entry["record_ordinals"]
@@ -832,6 +883,12 @@ def apply_native_manifest(manifest: dict[str, Any], systems: set[str]) -> None:
         "sets": "up to five queries per scheme, shape and q; the trials of a cell pool all its sets",
         "source": "systems/experiments/native-queries/README.md",
     }
+    if NATIVE.get("from_hmf"):
+        manifest["selection_rules"]["records_from_hmf"] = (
+            "DHT-backed and EVSEB verify the record lists of the HMF-Audit queries of R0_queries.json "
+            "(ascending ordinal order), so HMF-Audit, DHT-backed and EVSEB audit the same logs; a batch "
+            "that is clustered in HMF-Audit need not be clustered in their trees"
+        )
     manifest["system_semantics"]["HMF-Audit verification"] = (
         "one proof-verified ALL range query over the real service, log type, region and time range "
         "(all tenants; a tenant filter applies after verification), followed by HPP subset verification"
@@ -839,6 +896,76 @@ def apply_native_manifest(manifest: dict[str, Any], systems: set[str]) -> None:
     manifest["system_semantics"]["BLAS verification"] = (
         "native three-stage proof generation and verification of a time-range plus keyword query"
     )
+
+
+def apply_native_localization_manifest(manifest: dict[str, Any], dataset: Path) -> None:
+    """Replace the legacy workloads of an Experiment 2 manifest with the native batches: one
+    workload per (system, shape, q, set), listing the frozen records and the tampered log."""
+    assert NATIVE is not None and NATIVE.get("localization")
+    data = json.loads((Path(NATIVE["dir"]) / "R0_queries.json").read_text(encoding="utf-8"))
+    entries = [e for e in data["queries"] if "note" not in e and e["scheme"] == "HMF-Audit"
+               and ("HMF-Audit", e["shape"], e["q"]) in NATIVE["cells"]]
+    tampered_ordinal = {}
+    for entry in entries:
+        ordinals = sorted(entry["record_ordinals"])
+        tampered_ordinal[(entry["shape"], entry["q"], entry["set"])] = ordinals[len(ordinals) // 2]
+    source_ids = read_source_ids(dataset, set(tampered_ordinal.values()))
+    workloads = []
+    for entry in entries:
+        ordinals = sorted(entry["record_ordinals"])
+        offset = len(ordinals) // 2
+        ordinal = ordinals[offset]
+        for system in LOCALIZATION_SYSTEMS:
+            workload = {
+                "workload_id": f"{system}/{entry['shape']}/q={entry['q']}/set={entry['set']}",
+                "scheme": system,
+                "query_distribution": entry["shape"],
+                "requested_count_q": entry["q"],
+                "query_set": entry["set"],
+                "record_count": len(ordinals),
+                "record_ordinals_sha256": hashlib.sha256(
+                    ",".join(str(value) for value in ordinals).encode()
+                ).hexdigest(),
+                "first_ordinal": ordinals[0],
+                "last_ordinal": ordinals[-1],
+                "verification": None,
+                "localization": {
+                    "precondition": "integrity mismatch already established",
+                    "tamper_count": 1,
+                    "tampered_requested_offset": offset,
+                    "tampered_requested_offsets": [offset],
+                    "tampered_subset_ordinal": ordinal,
+                    "tampered_subset_ordinals": [ordinal],
+                    "tampered_record_ids": [source_ids[ordinal]],
+                },
+            }
+            for field in ("service", "log_type", "tenant", "time_range"):
+                if field in entry:
+                    workload[field] = entry[field]
+            workloads.append(workload)
+    manifest["schema_version"] = 3
+    manifest["workloads"] = workloads
+    parameters = manifest["benchmark_parameters"]
+    parameters["requested_counts_q"] = sorted({q for (_name, _shape, q) in NATIVE["cells"]})
+    parameters["query_distributions"] = list(NATIVE_PLACEMENTS)
+    parameters["native_query_files"] = NATIVE["files"]
+    parameters["native_query_sets_per_cell"] = {
+        f"{name}/{shape}/q={q}": len(sets) for (name, shape, q), sets in sorted(NATIVE["cells"].items())
+    }
+    parameters["tamper_count_experiment_batch_size_q"] = None
+    parameters["tamper_count_experiment_values"] = []
+    manifest["selection_rules"] = {
+        "batches": (
+            "the record lists of the HMF-Audit queries of R0_queries.json (region R0, one tenant, service, "
+            "log type and time range); EVSEB is given the same records, in the same ascending ordinal order"
+        ),
+        "localization_tamper": (
+            "one record per batch, the middle one: index floor(q/2) of the ascending ordinal list, "
+            "the same log in both schemes"
+        ),
+        "sets": "up to five queries per shape and q; the trials of a cell pool all its sets",
+        "source": "systems/experiments/native-queries/README.md",
+    }
 
 
 def workload_lookup(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1552,6 +1679,12 @@ def parse_arguments() -> argparse.Namespace:
         help="native query sets (verification only): the directory holding R0_queries.json and dht_evseb_queries.json",
     )
     parser.add_argument(
+        "--records-from-hmf",
+        action="store_true",
+        help="with --query-dir: DHT-backed and EVSEB verify the records of the HMF-Audit queries "
+             "(the same logs in every scheme) instead of their own batches",
+    )
+    parser.add_argument(
         "--max-q",
         action="append",
         default=[],
@@ -1575,7 +1708,7 @@ def main() -> None:
             if name not in {"HMF-Audit", "BLAS", "DHT-backed", "EVSEB"} or not value.isdigit() or int(value) <= 0:
                 raise SystemExit(f"--max-q expects SYSTEM=Q with SYSTEM one of HMF-Audit, BLAS, DHT-backed, EVSEB: {item!r}")
             caps[name] = int(value)
-        NATIVE = load_native(args.query_dir.resolve(), caps)
+        NATIVE = load_native(args.query_dir.resolve(), caps, args.records_from_hmf)
     results_dir = args.results_dir.resolve()
     dataset = args.dataset.resolve()
     environment_path = results_dir / "environment.txt"

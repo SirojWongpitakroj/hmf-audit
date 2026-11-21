@@ -179,8 +179,8 @@ start_services() {
 # export_fair_env: the variables the (unchanged) fair fixtures read.
 # use_native_queries: Experiment 1 and the ingest run the native clustered/scattered query
 # sets of native-queries/<records>/ (README there) instead of the fixed placements. Only
-# those two scripts call it: Experiments 2 and 3 keep the synthetic ALL tree and placements,
-# so FAIR_QUERY_DIR is unset for them (export_fair_env). DHT-backed is capped at FAIR_DHT_MAX_Q
+# the experiments that run the native query set call it (Experiments 1 and 2, and the ingest):
+# the others keep the synthetic ALL tree, so FAIR_QUERY_DIR is unset for them (export_fair_env). DHT-backed is capped at FAIR_DHT_MAX_Q
 # (default 2048, so it runs q = 1..1024) because of its working-memory bounds.
 use_native_queries() {
     # FAIR_QUERY_SET names another query-set directory for the same record count (for example
@@ -209,7 +209,7 @@ export_fair_env() {
     export FAIR_DHT_PEERS="$DHT_PEERS"
     # Experiments 1 and 3 run the native query set, which was found on the
     # pinned 10M dataset (systems/experiments/native-queries); the fixtures
-    # check its record count. Experiment 2 keeps clustered-2/scattered.
+    # check its record count. Experiment 2 also runs it (exp2_localization.sh calls use_native_queries).
     if (( RECORDS == 10000000 )); then
         export FAIR_NATIVE_QUERIES_DIR="$(winpath "$EXP_DIR/native-queries/${FAIR_QUERY_SET:-$RECORDS}")"
     else

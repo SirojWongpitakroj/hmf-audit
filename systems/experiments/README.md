@@ -10,7 +10,7 @@ can be pointed at a remote database.
 | Script | Experiment | Output (in `<output>/<name>/`) |
 |---|---|---|
 | `exp1_verification` | Verification latency: HMF-Audit, DHT-backed, BLAS, EVSEB; native clustered and scattered queries, 5 per cell; maximum q is 1024 for BLAS and EVSEB, 4096 for HMF-Audit and DHT-backed | raw `*.txt`, `latency_trials.csv`, `latency_summary.csv`, `figure1_verification_latency.png` |
-| `exp2_localization` | Tamper localization latency: HMF-Audit vs EVSEB, one tampered record; clustered-2 and scattered; q = 1 … 4096 | raw `*.txt`, `latency_trials.csv`, `latency_summary.csv`, `figure2_localization_latency.png` |
+| `exp2_localization` | Tamper localization latency: HMF-Audit vs EVSEB, one tampered record; the native HMF-Audit batches (clustered and scattered) for both systems; q = 1 … 4096 | raw `*.txt`, `latency_trials.csv`, `latency_summary.csv`, `figure2_localization_latency.png` |
 | `exp3_ablation` | HMF-Audit ablation: Full, no shared planning, no deduplication, no partition-aware retrieval; q = 256 … 4096 | `ablation_latency_raw.csv`, `ablation_summary.csv`, `figure3_ablation_latency.png` |
 | `run_all` | Runs the three above in order, then compares with the earlier 10M results | all of the above, plus the comparison on the console |
 
@@ -79,7 +79,28 @@ scheme, shape and q, timed separately and pooled per cell in the summary
   leaf under a different branch.
 
 Benchmarks are named `<shape>/q=<q>/set=<1..5>` and report
-`workload-version/op` 9. Experiment 2 keeps the clustered-2/scattered requests.
+`workload-version/op` 9.
+
+**Experiment 2** (HMF-Audit vs EVSEB) runs the same HMF-Audit batches for both schemes: the
+`record_ordinals` of every HMF-Audit entry of `R0_queries.json` (the HMF-Audit query is
+resolved through ALL once, outside the timer, and checked against the file) are the
+records both schemes audit, in ascending ordinal order. The middle record of each batch
+(index `q/2` of that list) is the single tampered log, the same one in both schemes. A timed
+operation detects the mismatch and localizes the tampered record (detect + localize in both),
+and the benchmark checks that exactly that record was found. Benchmarks are named
+`<shape>/q=<q>/set=<n>`, pooled per cell in the summary. EVSEB's own `dht_evseb_queries.json`
+sets are not used here: a batch that is clustered in HMF-Audit is not clustered in EVSEB's
+quaternary tree. `--q-list 1,16,...` runs and summarizes only those q values.
+
+**Same logs in every scheme (Experiment 1).** `exp1_verification.sh --records-from-hmf` makes
+DHT-backed and EVSEB verify the `record_ordinals` of the HMF-Audit queries (ascending ordinal
+order) instead of their own `dht_evseb_queries.json` batches, so HMF-Audit, DHT-backed and EVSEB
+audit the same logs in every cell. It sets `FAIR_BATCHES_FROM_HMF=1`, which the DHT-backed and
+EVSEB benchmarks and the post-processing read. For example, for just those two schemes:
+`FAIR_QUERY_SET=10000000-skewed ./exp1_verification.sh --systems dht-backed,evseb --records-from-hmf --count 20 --warmup 3 --dataset <skewed jsonl>`.
+A batch that is clustered in HMF-Audit is not clustered in their trees, and the records of a
+scattered HMF-Audit batch can need more DHT proof lookups than DHT-backed's own scattered batch
+(the benchmark's limits are `FAIR_DHT_MAX_REQUESTS` etc., see "Known limitations").
 
 ## Shard-count study (HMF-Audit)
 

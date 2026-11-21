@@ -11,7 +11,7 @@ q = 1024 (`FAIR_DHT_MAX_Q`, default 2048). Each dataset size has its own directo
 directory made for another dataset. Generate a new one with
 `python make_queries.py --dataset <jsonl> --out <dir>`. Cells with fewer than five distinct
 queries (the small 100k set) carry a `note` entry and run with the sets that exist.
-Experiments 2 and 3 do not use them. The result tables below are for the 10M set.
+Experiment 2 (localization) uses the HMF-Audit batches of `R0_queries.json` for both HMF-Audit and EVSEB (same records; one tampered record per batch, the middle one by ordinal); experiment 3 does not use them. The result tables below are for the 10M set.
 
 Found on the pinned 10,000,000-record subset (SHA-256 `a8fa53db…`), region **R0**: 2,500,000 logs in 306 segments of 8,192 leaves. Each query returns **exactly q logs**. Five queries for each scheme, shape and q in {1, 16, 64, 256, 1024, 4096} where they exist (HMF-Audit has none for clustered q >= 64 or scattered q = 4096). The full machine-readable list is `10000000/R0_queries.json` (HMF-Audit and BLAS, including each query's record ordinals).
 

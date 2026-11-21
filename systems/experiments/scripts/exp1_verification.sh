@@ -14,6 +14,10 @@ common=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
     --q-list) Q_LIST="$2"; shift 2 ;;
+    # --records-from-hmf: DHT-backed and EVSEB verify the records of the HMF-Audit queries
+    # (R0_queries.json, ascending ordinal order) instead of their own batches, so that the
+    # schemes audit the same logs.
+    --records-from-hmf) export FAIR_BATCHES_FROM_HMF=1; shift ;;
     *) common+=("$1"); shift ;;
     esac
 done

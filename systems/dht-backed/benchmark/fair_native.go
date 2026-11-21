@@ -27,11 +27,21 @@ const fairNativeSets = 5
 
 func fairNativeQueriesDir() string { return os.Getenv("FAIR_NATIVE_QUERIES_DIR") }
 
+// fairBatchesFromHMF (FAIR_BATCHES_FROM_HMF=1) makes DHT-backed audit the records of the
+// HMF-Audit queries of R0_queries.json instead of its own dht_evseb_queries.json batches, so
+// that HMF-Audit, DHT-backed and EVSEB verify the same logs. The records are taken in
+// ascending ordinal order.
+func fairBatchesFromHMF() bool { return os.Getenv("FAIR_BATCHES_FROM_HMF") == "1" }
+
 // fairNativeDHTBatches returns the native batches as record IDs, keyed and
 // ordered by (shape, q, set), after checking that every (shape, q) has exactly
 // sets 1..5 with q distinct ordinals inside [0, total).
 func fairNativeDHTBatches(dir string, total int) (map[fairDHTCase][]string, []fairDHTCase, error) {
-	data, err := os.ReadFile(filepath.Join(dir, "dht_evseb_queries.json"))
+	fileName, scheme := "dht_evseb_queries.json", "DHT-backed"
+	if fairBatchesFromHMF() {
+		fileName, scheme = "R0_queries.json", "HMF-Audit"
+	}
+	data, err := os.ReadFile(filepath.Join(dir, fileName))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -48,7 +58,9 @@ func fairNativeDHTBatches(dir string, total int) (map[fairDHTCase][]string, []fa
 	if err := json.Unmarshal(data, &file); err != nil {
 		return nil, nil, fmt.Errorf("decode native batches: %w", err)
 	}
-	if file.Records != total {
+	// R0_queries.json records the size of region R0, not of the dataset; its ordinals are
+	// range-checked against the fixture below.
+	if !fairBatchesFromHMF() && file.Records != total {
 		return nil, nil, fmt.Errorf("native batches were found on %d records, the fixture has %d", file.Records, total)
 	}
 	wanted := make(map[int]bool, len(fairDHTRequestCounts))
@@ -62,7 +74,7 @@ func fairNativeDHTBatches(dir string, total int) (map[fairDHTCase][]string, []fa
 	batches := map[fairDHTCase][]string{}
 	var cases []fairDHTCase
 	for _, entry := range file.Queries {
-		if entry.Scheme != "DHT-backed" || !wanted[entry.Q] {
+		if entry.Scheme != scheme || !wanted[entry.Q] {
 			continue
 		}
 		if _, ok := shapeOrder[entry.Shape]; !ok {
@@ -77,7 +89,12 @@ func fairNativeDHTBatches(dir string, total int) (map[fairDHTCase][]string, []fa
 		}
 		distinct := make(map[int]bool, entry.Q)
 		ids := make([]string, len(entry.Ordinals))
-		for index, ordinal := range entry.Ordinals {
+		ordinals := entry.Ordinals
+		if fairBatchesFromHMF() {
+			ordinals = append([]int(nil), ordinals...)
+			sort.Ints(ordinals)
+		}
+		for index, ordinal := range ordinals {
 			if ordinal < 0 || ordinal >= total || distinct[ordinal] {
 				return nil, nil, fmt.Errorf("native batch %s/q=%d/set=%d has a bad ordinal %d", entry.Shape, entry.Q, entry.Set, ordinal)
 			}
@@ -88,7 +105,7 @@ func fairNativeDHTBatches(dir string, total int) (map[fairDHTCase][]string, []fa
 		cases = append(cases, key)
 	}
 	if want := len(fairNativeShapes) * len(fairDHTRequestCounts) * fairNativeSets; len(cases) != want {
-		return nil, nil, fmt.Errorf("found %d native DHT-backed batches, want %d", len(cases), want)
+		return nil, nil, fmt.Errorf("found %d native %s batches, want %d", len(cases), scheme, want)
 	}
 	sort.Slice(cases, func(i, j int) bool {
 		a, b := cases[i], cases[j]

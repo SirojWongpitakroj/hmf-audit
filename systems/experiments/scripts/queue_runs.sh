@@ -11,8 +11,9 @@
 #   3. BLAS,       every q (1..4096), 3 warm-up + 20 measured runs
 #   4. HMF-Audit,  every q (1..4096), 3 warm-up + 20 measured runs, with the shard count in
 #                  results/queue-hmf-shards.txt (read when the job starts; default 4)
-#   5. Experiment 2 (tamper localization, HMF-Audit and EVSEB, clustered-2 and scattered),
-#                  q = 1, 16, 64, 256, 1024, 4096, 3 warm-up + 20 measured runs, same shard count
+#   5. Experiment 2 (tamper localization, HMF-Audit and EVSEB, on the HMF-Audit native batches
+#                  of the query set; EVSEB gets the same records), q = 1, 16, 64, 256, 1024,
+#                  4096, 3 warm-up + 20 measured runs, same shard count
 #   6. Experiment 3 (HMF-Audit ablation, native queries q = 256, 1024, 4096),
 #                  3 warm-up + 20 measured rounds per variant, same shard count
 # A failed job is logged and the next one still runs. Each job writes its own log and results folder;

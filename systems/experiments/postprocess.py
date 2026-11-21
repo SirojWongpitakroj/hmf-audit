@@ -65,6 +65,14 @@ def command_output(*command: str) -> str:
 def native_environment_lines(args: argparse.Namespace) -> list[str]:
     """Request sizes and query selection: the native query sets, or the fixed placements."""
     query_dir = getattr(args, "query_dir", None)
+    if query_dir and getattr(args, "experiment", "") == "exp2_localization":
+        return [
+            f"requested_counts={os.environ.get('FAIR_Q_LIST') or '1,16,64,256,1024,4096'}",
+            "query_distributions=clustered,scattered",
+            f"native_query_dir={query_dir}",
+            "native_queries=the HMF-Audit batches of R0_queries.json (up to 5 clustered and 5 scattered per q); "
+            "EVSEB localizes the same records; one tampered record per batch, the middle one by ordinal",
+        ]
     if not query_dir:
         counts = [q for q in (1, 16, 64, 256, 1024, 4096, 16384) if q <= int(os.environ.get("FAIR_MAX_REQUEST_Q", "16384"))]
         return [f"requested_counts={','.join(map(str, counts))}", "query_distributions=clustered-2,scattered"]
@@ -72,7 +80,9 @@ def native_environment_lines(args: argparse.Namespace) -> list[str]:
         "requested_counts=1,16,64,256,1024,4096",
         "query_distributions=clustered,scattered",
         f"native_query_dir={query_dir}",
-        "native_queries=up to 5 clustered and 5 scattered audit batches per scheme and q (native-queries/README.md)",
+        "native_queries=up to 5 clustered and 5 scattered audit batches per scheme and q (native-queries/README.md)"
+        + ("; DHT-backed and EVSEB verify the records of the HMF-Audit queries (FAIR_BATCHES_FROM_HMF=1)"
+           if os.environ.get("FAIR_BATCHES_FROM_HMF") == "1" else ""),
         f"dht_backed_max_q={getattr(args, 'dht_max_q', 2048)}",
     ]
 
@@ -163,6 +173,8 @@ def run_exp1(args: argparse.Namespace) -> None:
     ]
     if getattr(args, "query_dir", None):
         command += ["--query-dir", args.query_dir]
+        if os.environ.get("FAIR_BATCHES_FROM_HMF") == "1":
+            command += ["--records-from-hmf"]
         if "dht-backed" in args.systems.split(","):
             command += ["--max-q", f"DHT-backed={args.dht_max_q}"]
     subprocess.run(command, check=True)
@@ -175,6 +187,12 @@ def run_exp2(args: argparse.Namespace) -> None:
     results = Path(args.results_dir).resolve()
     environment = fb.parse_environment(results / "environment.txt")
     segment_leaves = int(environment.get("hmf_segment_leaves", "8192"))
+    # Native query set (exp2_localization.sh exports FAIR_QUERY_DIR): both schemes localize the
+    # records of the HMF-Audit queries. Without it the fixed clustered-2/scattered placements.
+    if getattr(args, "query_dir", None):
+        q_text = os.environ.get("FAIR_Q_LIST", "")
+        q_list = tuple(int(q) for q in q_text.split(",")) if q_text else None
+        fb.NATIVE = fb.load_native_localization(Path(args.query_dir).resolve(), q_list)
     localization = {
         "hmf-audit.txt": {"BenchmarkFairHMFLocalizationAfterMismatch"},
         "evseb.txt": {"BenchmarkFairEVBESLocalizationAfterMismatch"},
@@ -191,6 +209,8 @@ def run_exp2(args: argparse.Namespace) -> None:
         Path(args.dataset).resolve(), args.count, args.warmup, args.bench_time, 42, segment_leaves,
         verification_only=False,
     )
+    if fb.NATIVE is not None:
+        fb.apply_native_localization_manifest(manifest, Path(args.dataset).resolve())
     if environment.get("benchmark_subset_sha256") != manifest["dataset"]["sha256"]:
         raise SystemExit("benchmark subset hash differs between environment and dataset")
     manifest["system_parameters"]["HMF-Audit"]["shards_per_region"] = int(environment.get("hmf_shards_per_region", "1"))

@@ -96,10 +96,45 @@ func runFairEVBES(b *testing.B, tamper bool) {
 	database, dht, setup := sharedFairEVBES(b)
 	segmentLeaves := fairEVBESSegmentLeaves(b)
 
+	// Experiment 2 on the native query set: EVSEB localizes the records of every HMF-Audit
+	// batch in R0_queries.json, with the same record tampered as in HMF-Audit (the middle
+	// record of the ascending ordinal list), so both schemes audit and tamper the same logs.
+	if dir := fairNativeQueriesDir(); dir != "" && tamper {
+		batches, err := loadFairHMFBatches(dir, fairEVBESNativeRequestCounts, setup.leafCount)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for _, batch := range batches {
+			b.Run(fmt.Sprintf("%s/q=%d/set=%d", batch.Shape, batch.Q, batch.Set), func(b *testing.B) {
+				b.StopTimer()
+				candidates := make([]string, len(batch.Ordinals))
+				for index, ordinal := range batch.Ordinals {
+					candidates[index] = fairEVBESLID(ordinal)
+				}
+				tamperedLIDs := []string{candidates[len(candidates)/2]}
+				if err := replaceFairEVBESTampers(ctx, database, tamperedLIDs); err != nil {
+					b.Fatal(err)
+				}
+				runFairEVBESCase(b, ctx, database, dht, setup, candidates, tamperedLIDs, fairNativeWorkloadVersion)
+			})
+		}
+		if err := clearFairEVBESTamper(ctx, database); err != nil {
+			b.Fatal(err)
+		}
+		return
+	}
+
 	// Experiment 1 on the native query set: the five batches of every
-	// (shape, q) in dht_evseb_queries.json. Localization keeps clustered-2.
+	// (shape, q) in dht_evseb_queries.json.
 	if dir := fairNativeQueriesDir(); dir != "" && !tamper {
-		batches, err := loadFairNativeBatches(dir, "EVSEB", fairEVBESNativeRequestCounts, setup.leafCount)
+		var batches []fairNativeBatch
+		var err error
+		if fairBatchesFromHMF() {
+			// The records of the HMF-Audit queries, so that every scheme verifies the same logs.
+			batches, err = loadFairHMFBatches(dir, fairEVBESNativeRequestCounts, setup.leafCount)
+		} else {
+			batches, err = loadFairNativeBatches(dir, "EVSEB", fairEVBESNativeRequestCounts, setup.leafCount)
+		}
 		if err != nil {
 			b.Fatal(err)
 		}
