@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Experiment 2B: ACHP corruption-density and locality evaluation. At a fixed audit size of
-# q = 4096, m = 1, 4, 16, 64 requested records are corrupted, clustered (one segment) or
+# q = 1024, m = 1, 4, 16, 64 requested records are corrupted, clustered (one segment) or
 # scattered (m distinct segments), and post-mismatch localization is timed for ACHP and for
 # the fixed-depth strategy on exactly the same corruption. Five fixed query sets, 3 warm-up
 # and 20 measured repetitions per query set and configuration (100 per configuration).
@@ -60,7 +60,7 @@ EXP2B_DIR="$RESULTS/exp2b"
 mkdir -p "$EXP2B_DIR/manifests" "$EXP2B_DIR/results"
 
 write_environment exp2_localization "hmf-audit" "$EXP2B_DIR/results"
-note "experiment 2B: q=4096, m in {1,4,16,64}, clustered/scattered, 5 query sets, 3 warm-up + 20 measured per set (HMF-Audit commit $git_commit)"
+note "experiment 2B: q=1024, m in {1,4,16,64}, clustered/scattered, 5 query sets, 3 warm-up + 20 measured per set (HMF-Audit commit $git_commit)"
 set +e
 (apply_endpoints hmf-audit; cd "$HMF_AUDIT_DIR" && FAIR_EXP2B=1 FAIR_EXP2B_OUT="$(winpath "$EXP2B_DIR")" \
 \

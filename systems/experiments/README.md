@@ -11,7 +11,7 @@ can be pointed at a remote database.
 |---|---|---|
 | `exp1_verification` | Verification latency: HMF-Audit, DHT-backed, BLAS, EVSEB; native clustered and scattered queries, 5 per cell; maximum q is 1024 for BLAS and EVSEB, 4096 for HMF-Audit and DHT-backed | raw `*.txt`, `latency_trials.csv`, `latency_summary.csv`, `figure1_verification_latency.png` |
 | `exp2_localization` | Tamper localization latency: HMF-Audit vs EVSEB, one tampered record; the native HMF-Audit batches (clustered and scattered) for both systems; q = 1 … 4096 | raw `*.txt`, `latency_trials.csv`, `latency_summary.csv`, `figure2_localization_latency.png` |
-| `exp2b_localization` | Experiment 2B, corruption density and locality: ACHP vs fixed-depth HMF at q = 4096, m = 1, 4, 16, 64 corrupted records, clustered or scattered, on the same corruption; 5 fixed query sets, 3 warm-up + 20 measured per set | `exp2b/manifests/{queries,corruption}.json`, `exp2b/results/{raw.csv,summary.csv,run_config.json}` (no figure) |
+| `exp2b_localization` | Experiment 2B, corruption density and locality: ACHP vs fixed-depth HMF at q = 1024, m = 1, 4, 16, 64 corrupted records, clustered or scattered, on the same corruption; 5 fixed query sets, 3 warm-up + 20 measured per set | `exp2b/manifests/{queries,corruption}.json`, `exp2b/results/{raw.csv,summary.csv,run_config.json}` (no figure) |
 | `exp3_ablation` | HMF-Audit ablation: Full, no shared planning, no deduplication, no partition-aware retrieval; q = 256 … 4096 | `ablation_latency_raw.csv`, `ablation_summary.csv`, `figure3_ablation_latency.png` |
 | `run_all` | Runs the three above in order, then compares with the earlier 10M results | all of the above, plus the comparison on the console |
 
@@ -109,19 +109,27 @@ scattered HMF-Audit batch can need more DHT proof lookups than DHT-backed's own 
 the number of corrupted records m and their physical distribution change. It never touches Experiment 2
 (2A), which keeps writing to `<output>/exp2_localization/`; 2B writes to `<output>/exp2_localization/exp2b/`.
 
-* **Workload.** Five fixed query sets, each exactly q = 4096 distinct records of the 10M dataset: 8 dense
-  segments with 256 consecutive requested records (so a clustered m up to 64 fits in one segment) and 128
-  sparse segments with 16 records each (so a scattered m up to 64 has 136 distinct segments to spread over).
+* **Workload.** Five fixed query sets, each exactly q = 1024 distinct records of the 10M dataset: 4 dense
+  segments with 128 consecutive requested records (so a clustered m up to 64 fits in one segment) and 64
+  sparse segments with 8 records each (so a scattered m up to 64 has 68 distinct segments, one record each).
   `manifests/queries.json` holds them. The ALL range query is not part of 2B: the manifest's ordinals are the
   batch.
-* **Corruption.** m in {1, 4, 16, 64}. m = 1 is one common case; for m > 1, *clustered* draws m requested records
-  of one randomly chosen segment that holds at least m, and *scattered* cuts the segments the query touches
-  (in physical order) into m strata and draws one record from a random segment of each, so the m records sit in
-  m distinct segments spread over the whole query. Each (query, m, pattern) has 3 warm-up and 20 measured
-  draws, all distinct, with seeds derived from the master seed (default 20261123, `--seed`). They are drawn once
-  and persisted in `manifests/corruption.json`: every algorithm receives exactly the same corrupted records, and a
-  rerun reuses the manifests (a changed parameter or layout is an error, never a silent redraw). A query that
-  cannot support a pattern fails validation. 805 cases in all (5 queries x 7 patterns x 23).
+* **Corruption locality** is a property of where the corrupted records sit and is kept apart from the
+  *query locality* (how the audited records are laid out: here always dense+sparse). m in {1, 4, 16, 64}.
+  m = 1 is one shared case (locality `common`), aggregated once. For m > 1: *clustered* draws m distinct
+  requested records from one randomly chosen segment that holds at least m of them (a query with no such segment
+  is flagged unsuitable and the run stops, the definition is never weakened); *scattered* takes one record per
+  segment, from m equal strata of the segments the query touches in physical order, so the m segments are
+  distinct and spread over the whole query (if the query touched fewer than m segments, every segment is used
+  and the records are dealt out as evenly as capacity allows). Each (query, m, locality) has 3 warm-up and 20
+  measured draws, all distinct, seeded from the master seed (default 20261123, `--seed`), the query, m, locality
+  and repetition. They are drawn once and persisted in `manifests/corruption.json` with, per case, the actual
+  locality, the distinct segments, shards and regions, the records per segment and the corrupted ordinals (the
+  canonical record IDs) and HMF addresses; validation recomputes this from the records and checks that exactly
+  m distinct records of the audit query are corrupted, clustered cases sit in one segment and scattered cases
+  span the widest spread the query allows. Every algorithm receives exactly the same corrupted records, and a
+  rerun reuses the manifests (a changed parameter or layout is an error, never a silent redraw; manifest files
+  from before locality metadata, version 1, are refused). 805 cases in all (5 queries x 7 localities x 23).
 * **Algorithms.** `ACHP` (`StrategyACHP`, default coefficients, recorded in `run_config.json`) and `FIXED`
   (`StrategyFixedDepth`). EVSEB is not run: its single detect-and-localize operation has no post-mismatch phase
   to time separately and no Cassandra partition reads or retrieval rounds to compare (`run_config.json` says so).
@@ -139,9 +147,9 @@ the number of corrupted records m and their physical distribution change. It nev
   partitions, retrieval rounds, nodes and evidence bytes (32 per node), retrieval time, ACHP planning time,
   mismatching nodes met, confirmed corrupted leaves, requested and executed strategy, fallback and its reason,
   exact-set correctness (false positives, missed, non-record suspects, unresolved evidence), proof replay against
-  the trusted root, status, query, m, pattern, repetition, seed and corrupted ordinals. A measurement that does
+  the trusted root, status, query and its locality, m, corruption locality (requested and actual), repetition, seed, corrupted ordinals and addresses, and the segments, shards and regions affected. A measurement that does
   not apply (planning time of fixed-depth) is an empty cell, never 0, and an errored run has no latency.
-* **`summary.csv`:** per algorithm, m and pattern: sample counts, error / incorrect / unverified / fallback /
+* **`summary.csv`:** per corruption count x corruption locality x algorithm, with the locality metadata (mean distinct segments, shards and regions): sample counts, error / incorrect / unverified / fallback /
   unresolved counts, p50 and p95 latency (nearest-rank) and the mean I/O, transfer, round and planning figures.
   Latency statistics use valid rows only; a fixed-depth fallback is never an ACHP result.
 
